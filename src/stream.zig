@@ -132,23 +132,21 @@ pub const EncodeOptions = struct {
     /// Maximum depth for key folding. Default: unlimited.
     flatten_depth: usize = constants.max_flatten_depth,
 
-    const Self = @This();
-
     /// Default options.
-    pub const default: Self = .{};
+    pub const default: EncodeOptions = .{};
 
     /// Create options with key folding enabled.
-    pub fn withKeyFolding(key_folding: constants.KeyFoldingMode) Self {
+    pub fn withKeyFolding(key_folding: constants.KeyFoldingMode) EncodeOptions {
         return .{ .key_folding = key_folding };
     }
 
     /// Create options with custom delimiter.
-    pub fn withDelimiter(delimiter: constants.Delimiter) Self {
+    pub fn withDelimiter(delimiter: constants.Delimiter) EncodeOptions {
         return .{ .delimiter = delimiter };
     }
 
     /// Create options with custom indent size.
-    pub fn withIndent(indent: u8) Self {
+    pub fn withIndent(indent: u8) EncodeOptions {
         return .{ .indent = indent };
     }
 };
@@ -170,23 +168,21 @@ pub const DecodeOptions = struct {
     /// Path expansion mode. Default: off.
     expand_paths: constants.ExpandPathsMode = constants.default_expand_paths,
 
-    const Self = @This();
-
     /// Default options.
-    pub const default: Self = .{};
+    pub const default: DecodeOptions = .{};
 
     /// Create options with strict mode disabled (lenient parsing).
-    pub fn lenient() Self {
+    pub fn lenient() DecodeOptions {
         return .{ .strict = false };
     }
 
     /// Create options with path expansion enabled.
-    pub fn withPathExpansion(expand_paths: constants.ExpandPathsMode) Self {
+    pub fn withPathExpansion(expand_paths: constants.ExpandPathsMode) DecodeOptions {
         return .{ .expand_paths = expand_paths };
     }
 
     /// Create options with custom indent size.
-    pub fn withIndent(indent: u8) Self {
+    pub fn withIndent(indent: u8) DecodeOptions {
         return .{ .indent = indent };
     }
 };
