@@ -64,28 +64,28 @@ pub fn formatNumber(allocator: Allocator, n: f64) Allocator.Error!?[]u8 {
 /// "1.5" -> "1.5" (no change)
 /// "100" -> "100" (no decimal, no change)
 fn removeTrailingZeros(allocator: Allocator, s: []const u8) Allocator.Error![]u8 {
-    // Find decimal point
+    // Check for exponent - if present, expand it first (per spec, no exponent notation)
+    if (std.mem.indexOfAny(u8, s, "eE") != null) {
+        return expandExponent(allocator, s);
+    }
+
+    return stripTrailingDecimalZeros(allocator, s);
+}
+
+/// Strip trailing zeros from a decimal string (no exponent handling).
+fn stripTrailingDecimalZeros(allocator: Allocator, s: []const u8) Allocator.Error![]u8 {
     const dot_pos = std.mem.indexOfScalar(u8, s, '.') orelse {
-        // No decimal point, return as-is
         return allocator.dupe(u8, s);
     };
 
-    // Check for exponent - if present, handle it
-    const exp_pos = std.mem.indexOfAny(u8, s, "eE");
-    if (exp_pos != null) {
-        // Has exponent - need to expand it (per spec, no exponent notation)
-        return try expandExponent(allocator, s);
-    }
-
-    // Find last non-zero digit after decimal
     var end = s.len;
     while (end > dot_pos + 1 and s[end - 1] == '0') {
         end -= 1;
     }
 
-    // If only zeros after decimal, remove the decimal point too
+    // Remove decimal point too if only zeros followed it
     if (end == dot_pos + 1) {
-        return allocator.dupe(u8, s[0..dot_pos]);
+        end = dot_pos;
     }
 
     return allocator.dupe(u8, s[0..end]);
@@ -114,37 +114,11 @@ fn expandExponent(allocator: Allocator, s: []const u8) Allocator.Error![]u8 {
 
 /// Format a decimal number without exponent notation.
 fn formatDecimalExpanded(allocator: Allocator, n: f64) Allocator.Error![]u8 {
-    // Use a buffer and format with high precision
     var buf: [350]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
-
-    // Format with decimal precision (no exponent)
-    std.fmt.format(writer, "{d:.17}", .{n}) catch {
-        // Fallback to standard formatting
-        return try std.fmt.allocPrint(allocator, "{d}", .{n});
+    const formatted = std.fmt.bufPrint(&buf, "{d:.17}", .{n}) catch {
+        return std.fmt.allocPrint(allocator, "{d}", .{n});
     };
-
-    const formatted = fbs.getWritten();
-    return try removeTrailingZerosSimple(allocator, formatted);
-}
-
-/// Simple trailing zero removal (no exponent handling).
-fn removeTrailingZerosSimple(allocator: Allocator, s: []const u8) Allocator.Error![]u8 {
-    const dot_pos = std.mem.indexOfScalar(u8, s, '.') orelse {
-        return allocator.dupe(u8, s);
-    };
-
-    var end = s.len;
-    while (end > dot_pos + 1 and s[end - 1] == '0') {
-        end -= 1;
-    }
-
-    if (end == dot_pos + 1) {
-        return allocator.dupe(u8, s[0..dot_pos]);
-    }
-
-    return allocator.dupe(u8, s[0..end]);
+    return stripTrailingDecimalZeros(allocator, formatted);
 }
 
 // ============================================================================
