@@ -556,46 +556,27 @@ fn parseCountAndDelimiter(content: []const u8) errors.Error!CountDelimiter {
 }
 
 /// Parse delimiter-separated values into a slice of strings.
+/// For values that also need quoting information preserved, use parseDelimitedTokens instead.
 pub fn parseDelimitedValues(allocator: Allocator, content: []const u8, delimiter: constants.Delimiter) errors.Error![]const []const u8 {
-    if (content.len == 0) {
+    const tokens = try parseDelimitedTokens(allocator, content, delimiter);
+    if (tokens.len == 0) {
         return &.{};
     }
 
     var values: std.ArrayListUnmanaged([]const u8) = .empty;
+    values.ensureTotalCapacity(allocator, tokens.len) catch return errors.Error.OutOfMemory;
     errdefer {
         for (values.items) |v| allocator.free(v);
         values.deinit(allocator);
+        for (tokens) |*t| @constCast(t).deinit(allocator);
+        allocator.free(tokens);
     }
 
-    const delim_char = delimiter.char();
-    var start: usize = 0;
-    var i: usize = 0;
-
-    while (i <= content.len) {
-        const at_end = i >= content.len;
-        const at_delimiter = !at_end and content[i] == delim_char;
-
-        if (at_end or at_delimiter) {
-            const raw_value = content[start..i];
-            const value = try parseFieldValue(allocator, raw_value);
-            values.append(allocator, value) catch return errors.Error.OutOfMemory;
-            start = i + 1;
-            i += 1;
-        } else if (!at_end and content[i] == constants.double_quote) {
-            // Skip quoted value
-            const quote_result = string_utils.findClosingQuote(content[i + 1 ..]);
-            switch (quote_result) {
-                .found => |pos| {
-                    i += pos + 2;
-                },
-                .unterminated => return errors.Error.UnterminatedString,
-                .invalid_escape => return errors.Error.InvalidEscapeSequence,
-            }
-        } else {
-            i += 1;
-        }
+    for (tokens) |token| {
+        values.appendAssumeCapacity(token.value);
     }
 
+    allocator.free(tokens);
     return values.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
 }
 
@@ -646,20 +627,6 @@ pub fn parseDelimitedTokens(
     }
 
     return tokens.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
-}
-
-/// Parse a single field value (handles quoting and trimming).
-fn parseFieldValue(allocator: Allocator, raw: []const u8) errors.Error![]const u8 {
-    const trimmed = std.mem.trim(u8, raw, " ");
-    if (trimmed.len == 0) {
-        return allocator.dupe(u8, "") catch errors.Error.OutOfMemory;
-    }
-
-    if (trimmed[0] == constants.double_quote) {
-        return string_utils.parseQuotedString(allocator, trimmed);
-    }
-
-    return allocator.dupe(u8, trimmed) catch errors.Error.OutOfMemory;
 }
 
 /// Parse a single field value into a token with quoting information.
