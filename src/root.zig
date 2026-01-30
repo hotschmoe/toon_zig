@@ -13,6 +13,7 @@ pub const stream = @import("stream.zig");
 pub const scanner = @import("scanner.zig");
 pub const parser = @import("parser.zig");
 pub const decoder = @import("decoder.zig");
+pub const encoder = @import("encoder.zig");
 pub const literal_utils = @import("shared/literal_utils.zig");
 pub const string_utils = @import("shared/string_utils.zig");
 pub const validation = @import("shared/validation.zig");
@@ -62,6 +63,11 @@ pub const decodeToWriterWithOptions = decoder.decodeToWriterWithOptions;
 pub const toonToJson = decoder.toonToJson;
 pub const toonToJsonWithOptions = decoder.toonToJsonWithOptions;
 pub const valueToJson = decoder.valueToJson;
+
+// Re-export commonly used functions from encoder
+pub const formatNumber = encoder.formatNumber;
+pub const normalizeValue = encoder.normalizeValue;
+pub const isCanonicalNumber = encoder.isCanonicalNumber;
 
 test {
     // Run tests from all imported modules
