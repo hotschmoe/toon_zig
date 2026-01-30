@@ -56,11 +56,8 @@ pub fn isNumericLiteral(s: []const u8) bool {
     // Optional leading minus
     if (s[i] == '-') {
         i += 1;
-        if (i >= s.len) return false; // Standalone minus
+        if (i >= s.len) return false;
     }
-
-    // Integer part
-    if (i >= s.len) return false;
 
     if (s[i] == '0') {
         i += 1;
@@ -114,26 +111,11 @@ pub fn isNumericLiteral(s: []const u8) bool {
 /// This is used for encoder quoting decisions (SPEC.md Section 3.5):
 /// "Quote a string value when it looks like a number..."
 ///
-/// Returns true if the string:
-///   - Is a valid numeric literal
-///   - Starts with a digit or minus followed by digit
-///   - Would be parsed as a number by a naive reader
+/// Returns true if the string starts with a digit or minus followed by digit.
 pub fn isNumericLike(s: []const u8) bool {
     if (s.len == 0) return false;
-
-    // Check if it looks like it starts a number
-    if (s[0] == '-') {
-        if (s.len > 1 and constants.isDigit(s[1])) {
-            return true;
-        }
-        return false;
-    }
-
-    if (constants.isDigit(s[0])) {
-        return true;
-    }
-
-    return false;
+    if (constants.isDigit(s[0])) return true;
+    return s[0] == '-' and s.len > 1 and constants.isDigit(s[1]);
 }
 
 // ============================================================================
