@@ -2,6 +2,8 @@
 
 This document tracks feature parity between the Rust reference implementation (`toon_rust`) and our Zig implementation (`tzu`). Each section maps to a module or capability in the Rust codebase.
 
+**Target Spec Version:** [TOON v3.0](https://github.com/toon-format/spec) (2025-11-24)
+
 ---
 
 ## Status Legend

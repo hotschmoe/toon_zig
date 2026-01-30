@@ -1,190 +1,420 @@
-# TOON Specification Reference
+# SPEC.md - tzu Implementation Specification
 
-This document summarizes the [TOON Specification v1.5](https://github.com/toon-format/spec) that this implementation targets.
+This document specifies how tzu implements [TOON Specification v3.0](https://github.com/toon-format/spec). It serves as both a reference for contributors and a conformance checklist.
 
-## Overview
+---
 
-**Token-Oriented Object Notation (TOON)** is a line-oriented, indentation-based text format encoding JSON data with explicit structure and minimal quoting.
+## 1. Format Overview
 
-## Data Model
+TOON (Token-Oriented Object Notation) is a line-oriented, indentation-based format that encodes the JSON data model with explicit structure and minimal quoting.
 
-TOON preserves the JSON data model:
-- Objects (key-value maps)
-- Arrays (ordered lists)
-- Strings
-- Numbers
-- Booleans (true, false)
-- Null
+**Key Properties:**
+- Media Type: `application/toon` (provisional)
+- File Extension: `.toon`
+- Encoding: UTF-8 only
+- Line Terminator: LF (`\n`), not CRLF
 
-**Ordering**: Array order MUST be preserved. Object key order MUST be preserved as encountered by the encoder.
+---
 
-## Format Rules
+## 2. Data Model
 
-### Encoding
+TOON preserves the complete JSON data model:
 
-- UTF-8 encoding
-- LF (U+000A) line endings required
-- 2 spaces per indentation level (default)
-- Tabs forbidden for indentation
-- One space after colons and headers
+```
+JsonValue
+  |-- Primitive
+  |     |-- Null
+  |     |-- Bool (true | false)
+  |     |-- Number (f64, canonical form)
+  |     |-- String (UTF-8)
+  |-- Array (ordered, length-declared)
+  |-- Object (key-value pairs, insertion order preserved)
+```
 
-### Key Encoding
+### 2.1 Number Representation
 
-Unquoted keys must match: `^[A-Za-z_][A-Za-z0-9_.]*$`
+**Canonical Form (Encoding):**
+- No exponent notation: `1e6` -> `1000000`
+- No leading zeros: `007` is invalid as number (treated as string)
+- No trailing fractional zeros: `1.5000` -> `1.5`
+- Integer form when fractional part is zero: `1.0` -> `1`
+- Negative zero normalizes: `-0` -> `0`
+- NaN and Infinity encode as `null`
 
-Keys requiring quotes:
-- Special characters
-- Spaces
-- Structural symbols
+**Accepted on Decode:**
+- Both decimal and exponent forms: `1e-6`, `-1E+9`
+- Leading zeros are treated as strings, not numbers
 
-### String Quoting
+### 2.2 String Representation
 
-Strings must be quoted when:
-- Empty or containing leading/trailing whitespace
-- Matching reserved words: `true`, `false`, `null`
-- Appearing numeric (including leading zeros like "05")
-- Containing colons, quotes, backslashes, brackets, braces
-- Containing delimiters (comma, tab, pipe)
-- Starting with hyphens
+**Escape Sequences (Complete Set):**
 
-Valid escape sequences: `\\`, `\"`, `\n`, `\r`, `\t`
+| Escape | Character |
+|--------|-----------|
+| `\\`   | Backslash |
+| `\"`   | Double quote |
+| `\n`   | Newline (U+000A) |
+| `\r`   | Carriage return (U+000D) |
+| `\t`   | Tab (U+0009) |
 
-### Number Canonicalization
+**Invalid escapes trigger an error in strict mode.**
 
-Encoders must emit numbers in decimal form without:
-- Exponent notation (1e6 becomes 1000000)
-- Leading zeros (except single "0")
-- Trailing fractional zeros (1.5000 becomes 1.5)
-- Negative zero (-0 becomes 0)
+No Unicode escapes (`\uXXXX`) - UTF-8 is used directly.
 
-## Syntax
+---
 
-### Objects
+## 3. Syntax
 
-Primitive fields:
+### 3.1 Indentation
+
+- Default: 2 spaces per level
+- Tabs are strictly forbidden in indentation
+- Leading spaces must be exact multiples of indent size
+- Blank lines are generally ignorable (validated in strict mode for arrays)
+
+### 3.2 Objects
+
+Key-value pairs with colon separator:
+
 ```
 key: value
+nested:
+  inner: value
 ```
 
-Nested objects:
+**Unquoted Key Pattern:** `^[A-Za-z_][A-Za-z0-9_.]*$`
+
+Keys not matching this pattern must be quoted:
+
 ```
-user:
-  id: 123
-  name: Ada
+"special-key": value
+"123numeric": value
 ```
 
-### Arrays
+### 3.3 Arrays
 
-#### Header Format
-```
-key[N<delimiter?>]{field1,field2}:
-```
+#### 3.3.1 Array Header Format
 
-Where:
-- N = declared length
-- delimiter = optional (HTAB or pipe, comma is default)
-- fields = applies only to tabular arrays
+General form: `[N<delim?>]` or `key[N<delim?>]` or `key[N<delim?>]{fields}:`
 
-#### Primitive Arrays (Inline)
-```
-numbers[5]: 1,2,3,4,5
-tags[3]: red,green,blue
-```
+- `N` = non-negative integer (element count)
+- `<delim?>` = implicit comma (default), explicit `\t` (tab), or `|` (pipe)
+- Colon MUST terminate every header
 
-#### Tabular Arrays
-Objects with uniform keys and primitive-only values:
+#### 3.3.2 Primitive Arrays (Inline)
+
+Single line with delimiter-separated values:
+
 ```
-items[2]{id,name}:
-  1,Alice
-  2,Bob
+numbers[3]: 1,2,3
+flags[2]: true,false
+names[3]|Alice|Bob|Carol
 ```
 
-#### Expanded Lists
-Non-uniform arrays with hyphen markers:
+#### 3.3.3 Tabular Arrays (Uniform Objects)
+
+Objects with identical keys in identical order:
+
+```
+users[3]{id,name,active}:
+  1,Alice,true
+  2,Bob,false
+  3,Carol,true
+```
+
+Expands to:
+```json
+[
+  {"id": 1, "name": "Alice", "active": true},
+  {"id": 2, "name": "Bob", "active": false},
+  {"id": 3, "name": "Carol", "active": true}
+]
+```
+
+#### 3.3.4 Expanded List Form
+
+Mixed or complex elements:
+
 ```
 items[3]:
-  - value1
-  - value2
-  - value3
+  - first
+  - second
+  - third
 ```
 
-### Delimiters
+#### 3.3.5 List Items with Objects (v3.0)
 
-Three options:
-- **Comma** (default): no symbol in brackets
-- **Tab**: HTAB (U+0009) inside brackets
-- **Pipe**: "|" inside brackets
+Per v3.0, list-item objects with tabular arrays use this encoding:
 
-## Key Folding (Optional)
-
-Encoder feature collapsing nested single-key objects:
-
-```json
-{"a": {"b": {"c": 1}}}
+```
+data[2]:
+  - id: 1
+    rows[2]{x,y}:
+      10,20
+      30,40
+  - id: 2
+    rows[2]{x,y}:
+      50,60
+      70,80
 ```
 
-Becomes:
+The `- key[N]{fields}:` form places the header on the hyphen line.
+
+### 3.4 Delimiters
+
+Each array header declares an active delimiter for its scope:
+
+| Symbol | Delimiter |
+|--------|-----------|
+| (none) | Comma `,` |
+| `\|`   | Pipe      |
+| `\t`   | Tab       |
+
+Delimiter applies to:
+- Inline primitive splits
+- Field names in braces
+- All rows/items under that header
+
+Nested headers can change the delimiter for their scope.
+
+### 3.5 Quoting Rules
+
+**Quote a string value when it:**
+- Contains the active delimiter
+- Contains double quotes or backslashes
+- Has leading/trailing whitespace
+- Looks like a number, boolean, or null
+- Is empty string
+- Starts with `-` (list item marker)
+
+### 3.6 Key Folding (Optional)
+
+Collapses single-key object chains into dotted paths:
+
 ```
-a.b.c: 1
+config:
+  database:
+    host: localhost
 ```
 
-Safe mode: all segments must match `^[A-Za-z_][A-Za-z0-9_]*$`
+Folds to:
 
-## Path Expansion (Optional)
-
-Decoder feature splitting dotted keys:
 ```
-a.b.c: 1
+config.database.host: localhost
 ```
 
-Becomes:
-```json
-{"a": {"b": {"c": 1}}}
-```
+**Constraints:**
+- Only when `keyFolding = safe`
+- All segments must match `IdentifierSegment`: `^[A-Za-z_][A-Za-z0-9_]*$`
+- No conflicts with sibling keys
+- Respects `flattenDepth` limit
 
-## Root Form Detection
+### 3.7 Path Expansion (Optional)
 
-1. First depth-0 line is valid array header -> decode root array
-2. Single non-empty line, neither header nor key-value -> decode primitive
-3. Otherwise -> decode object
+Inverse of key folding - splits dotted keys back to nested objects.
+
+**Constraints:**
+- Only when `expandPaths = safe`
+- Only keys matching `IdentifierSegment` pattern are eligible
+- Path separator is `.` (U+002E)
+
+---
+
+## 4. Root Form Detection
+
+The decoder determines document structure by examining the first non-empty depth-0 line:
+
+1. Valid array header -> root array
+2. Single line (not header or key-value) -> single primitive
+3. Otherwise -> root object
 4. Empty document -> empty object `{}`
 
-## Strict Mode
+---
 
-When enabled (default), decoders enforce:
-- Array counts matching declared N
-- Tabular row widths matching field counts
-- Indentation as exact multiples of indentSize
-- No tabs in indentation
-- No blank lines within array/tabular blocks
-- Valid escape sequences only
-- Required colons after all keys
+## 5. Options
 
-## Host Type Normalization
+### 5.1 Encode Options
 
-Before encoding, normalize:
-- Dates -> ISO 8601 strings
-- Sets/Maps -> arrays/objects
-- NaN, +/-Infinity -> null
-- Undefined/functions -> null
-- BigInt -> number (if in range) or quoted string
+```zig
+pub const EncodeOptions = struct {
+    indent: u8 = 2,                    // spaces per indent level
+    delimiter: Delimiter = .comma,     // active delimiter
+    key_folding: KeyFoldingMode = .off, // .off or .safe
+    flatten_depth: usize = maxInt,     // max folding depth
+};
 
-## Conformance
+pub const Delimiter = enum { comma, tab, pipe };
+pub const KeyFoldingMode = enum { off, safe };
+```
 
-### Encoders MUST:
-- Produce deterministic output with preserved key/array order
-- Apply consistent delimiter-aware quoting
-- Emit matching array length counts
-- Normalize numbers canonically
+### 5.2 Decode Options
 
-### Decoders MUST:
-- Parse headers and apply declared delimiters correctly
-- Enforce strict-mode rules
-- Preserve ordering
-- Handle path expansion safely (when enabled)
+```zig
+pub const DecodeOptions = struct {
+    indent: u8 = 2,                       // expected indent size
+    strict: bool = true,                  // enable strict validation
+    expand_paths: ExpandPathsMode = .off, // .off or .safe
+};
 
-## References
+pub const ExpandPathsMode = enum { off, safe };
+```
 
-- [Official Specification](https://github.com/toon-format/spec)
-- [TOON Website](https://toonformat.dev/)
-- [Reference Implementation](https://github.com/toon-format/toon)
+---
+
+## 6. Error Handling
+
+### 6.1 Error Categories
+
+**Syntax Errors:**
+- `UnterminatedString`: Missing closing quote
+- `InvalidEscapeSequence`: Unknown escape like `\x`
+- `MissingColon`: Key without colon separator
+- `UnexpectedEndOfInput`: Truncated input
+
+**Indentation Errors:**
+- `InvalidIndentation`: Spaces not multiple of indent size
+- `TabsInIndentation`: Tab character in leading whitespace
+
+**Array Errors:**
+- `CountMismatch`: Declared count differs from actual
+- `BlankLineInArray`: Blank line within array (strict mode)
+- `MalformedArrayHeader`: Invalid bracket/field syntax
+
+**Structural Errors:**
+- `PathExpansionConflict`: Dotted key conflicts with existing structure
+- `InvalidJson`: Malformed JSON input (for encode)
+- `InvalidToon`: Malformed TOON input (for decode)
+
+### 6.2 Error Context
+
+Errors include:
+- Error code
+- Human-readable message
+- Line number (when applicable)
+- Column/position (when applicable)
+
+---
+
+## 7. Strict Mode Validation
+
+When `strict = true`, the decoder enforces:
+
+| Check | Description |
+|-------|-------------|
+| Indentation multiples | Spaces must be exact multiple of indent size |
+| No tabs | Tabs forbidden in indentation |
+| Count validation | Array length must match declared count |
+| No blank lines in arrays | Blank lines within array scope are errors |
+| Field count match | Tabular rows must have exactly the declared fields |
+| Valid escapes only | Only `\ " n r t` escapes permitted |
+
+---
+
+## 8. Conformance Requirements
+
+### 8.1 Encoder MUST
+
+1. Normalize numbers to canonical form
+2. Use consistent delimiter (default: comma)
+3. Quote strings/keys per specification
+4. Count array elements accurately
+5. Use LF line termination
+6. Match field count in tabular rows
+
+### 8.2 Decoder MUST
+
+1. Parse headers with correct bracket/field/colon syntax
+2. Unescape quoted strings/keys correctly
+3. Detect root form (array vs object vs primitive)
+4. Validate delimiter consistency within scope
+5. Enforce indentation multiples
+6. In strict mode: validate all counts and reject syntax errors
+
+### 8.3 Validator MUST
+
+1. Report all strict-mode errors
+2. Validate count declarations
+3. Check indentation consistency
+4. Verify delimiter usage matches headers
+
+---
+
+## 9. Implementation-Specific Details
+
+### 9.1 Memory Model
+
+- All public functions accept an `Allocator`
+- Returned slices are owned by caller (must free)
+- Internal operations use arena allocators where beneficial
+- No hidden allocations
+
+### 9.2 Streaming
+
+- `decodeStream` returns iterator of `JsonStreamEvent`
+- `encodeWriter` writes directly to any `std.io.Writer`
+- Memory usage bounded regardless of input size
+
+### 9.3 Number Precision
+
+- Internal representation: `f64`
+- Canonical output uses shortest representation
+- Values outside f64 range become `null`
+
+---
+
+## 10. References
+
+- [TOON Specification v3.0](https://github.com/toon-format/spec/blob/main/SPEC.md)
+- [Reference Implementation (TypeScript)](https://github.com/toon-format/toon)
+- [toon_rust Implementation](https://github.com/Dicklesworthstone/toon_rust)
+- [TOON Format Website](https://toonformat.dev/)
+
+---
+
+## Appendix A: Grammar (Informative)
+
+```
+document      = root-object | root-array | root-primitive | empty
+empty         = ""
+
+root-object   = { key-value-line }+
+root-array    = array-header { array-content }
+root-primitive = primitive-value
+
+key-value-line = indent key ":" SP value NL
+               | indent key ":" NL { nested-content }+
+
+array-header  = [ key ] "[" count [ delimiter ] "]" [ "{" field-list "}" ] ":" [ SP inline-values ]
+inline-values = value { delimiter value }*
+field-list    = field-name { delimiter field-name }*
+
+list-item     = indent "- " value NL
+              | indent "- " key ":" SP value NL { nested-content }*
+
+primitive     = null | bool | number | string
+null          = "null"
+bool          = "true" | "false"
+number        = [ "-" ] int [ frac ] [ exp ]
+string        = quoted-string | unquoted-string
+
+quoted-string = DQUOTE { char | escape }* DQUOTE
+unquoted-string = safe-char+
+escape        = "\" ( "\" | DQUOTE | "n" | "r" | "t" )
+
+key           = quoted-key | unquoted-key
+unquoted-key  = ALPHA-UNDER { ALPHANUM-UNDER-DOT }*
+quoted-key    = quoted-string
+
+indent        = SP*
+NL            = %x0A
+SP            = %x20
+DQUOTE        = %x22
+```
+
+---
+
+## Appendix B: Changelog
+
+| Version | Date | Changes |
+|---------|------|---------|
+| Draft   | 2025-01 | Initial tzu specification based on TOON v3.0 |

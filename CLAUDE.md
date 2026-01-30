@@ -133,7 +133,7 @@ we love you, Claude! do your best today
 
 **tzu** (TOON Zig) is a spec-first Zig implementation of TOON (Token-Oriented Object Notation).
 
-Reference: [TOON Spec v1.5](https://github.com/toon-format/spec) | [toon_rust](https://github.com/Dicklesworthstone/toon_rust)
+Reference: [TOON Spec v3.0](https://github.com/toon-format/spec) | [toon_rust](https://github.com/Dicklesworthstone/toon_rust)
 
 ### Toolchain
 

@@ -19,7 +19,7 @@ JSON (25 tokens):                    TOON (15 tokens):
 
 ## Features
 
-- **Spec-compliant**: Full conformance with [TOON Specification v1.5](https://github.com/toon-format/spec)
+- **Spec-compliant**: Full conformance with [TOON Specification v3.0](https://github.com/toon-format/spec)
 - **High performance**: Native Zig implementation with zero runtime dependencies
 - **Streaming decoder**: Process large inputs without full buffering
 - **Deterministic output**: Stable diffs and reproducible pipelines
@@ -170,7 +170,7 @@ toon_zig/
 
 ## Specification Compliance
 
-This implementation targets full compliance with [TOON Specification v1.5](https://github.com/toon-format/spec), including:
+This implementation targets full compliance with [TOON Specification v3.0](https://github.com/toon-format/spec), including:
 
 - Line-oriented, indentation-based format
 - UTF-8 encoding with LF line endings
