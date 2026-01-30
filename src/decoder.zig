@@ -212,11 +212,8 @@ pub const Decoder = struct {
             return;
         }
 
-        // Nested content - check if there's content at deeper level
         const next = try self.peekNonBlank();
-        const has_nested = next != null and next.?.depth > base_depth;
-
-        if (!has_nested) {
+        if (next == null or next.?.depth <= base_depth) {
             try builder.put(key, .{ .object = value.Object.init() });
             return;
         }
@@ -420,22 +417,19 @@ pub const Decoder = struct {
 
         switch (peeked.line_type) {
             .array_header => {
-                // Check if this is a keyed array (part of an object) or a root array
-                if (peeked.array_header) |header| {
-                    if (header.key != null) {
-                        // Keyed array is part of an object structure
-                        var builder = value.ObjectBuilder.init(self.allocator);
-                        errdefer builder.deinit();
-                        try self.decodeObjectEntries(&builder, nested_depth);
-                        return .{ .object = builder.toOwnedObject() };
-                    }
-                }
-                // Keyless array header - decode as array
-                var line = self.consumePeeked().?;
-                const header = line.array_header orelse {
-                    line.deinit(self.allocator);
+                const header = peeked.array_header orelse {
+                    self.discardPeeked();
                     return errors.Error.MalformedArrayHeader;
                 };
+
+                if (header.key != null) {
+                    var builder = value.ObjectBuilder.init(self.allocator);
+                    errdefer builder.deinit();
+                    try self.decodeObjectEntries(&builder, nested_depth);
+                    return .{ .object = builder.toOwnedObject() };
+                }
+
+                var line = self.consumePeeked().?;
                 return try self.decodeArrayContent(header, nested_depth, &line);
             },
             .list_item => return try self.decodeInferredArray(nested_depth),
