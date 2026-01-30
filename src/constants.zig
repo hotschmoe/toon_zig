@@ -103,9 +103,6 @@ pub const space: u8 = ' ';
 // Escape Sequences
 // ============================================================================
 
-/// Valid escape characters (after backslash)
-pub const valid_escapes = "\\\"nrt";
-
 /// Escape sequence mappings
 pub const EscapeMapping = struct {
     escaped: u8,
@@ -171,9 +168,7 @@ pub fn isKeyChar(c: u8) bool {
 
 /// Characters valid in an identifier segment (for key folding)
 /// Pattern: [A-Za-z_][A-Za-z0-9_]*
-pub fn isIdentifierStartChar(c: u8) bool {
-    return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_';
-}
+pub const isIdentifierStartChar = isKeyStartChar;
 
 /// Characters valid in the rest of an identifier segment
 pub fn isIdentifierChar(c: u8) bool {
