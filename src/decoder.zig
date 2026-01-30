@@ -100,17 +100,13 @@ pub const Decoder = struct {
         }
     }
 
-    /// Peek at the next non-blank line, but reject blank lines in strict mode.
-    /// Used for array content where SPEC.md Section 7 forbids blank lines.
-    fn peekNonBlankStrict(self: *Self, in_array: bool) errors.Error!?scanner.ScannedLine {
+    /// Peek at the next non-blank line within an array context.
+    /// In strict mode, blank lines within arrays are rejected per SPEC.md Section 7.
+    fn peekNonBlankInArray(self: *Self) errors.Error!?scanner.ScannedLine {
         while (true) {
             const line = try self.peekLine() orelse return null;
             if (line.line_type != .blank) return line;
-            // In strict mode, blank lines within arrays are an error
-            if (self.options.strict and in_array) {
-                return errors.Error.BlankLineInArray;
-            }
-            // Consume and discard the blank line
+            if (self.options.strict) return errors.Error.BlankLineInArray;
             self.discardPeeked();
         }
     }
@@ -295,7 +291,7 @@ pub const Decoder = struct {
 
         var row_count: usize = 0;
         while (true) {
-            const peeked = try self.peekNonBlankStrict(true) orelse break;
+            const peeked = try self.peekNonBlankInArray() orelse break;
             if (peeked.depth != base_depth + 1 or peeked.line_type != .tabular_row) break;
 
             var line = self.consumePeeked().?;
@@ -341,7 +337,7 @@ pub const Decoder = struct {
 
         var item_count: usize = 0;
         while (true) {
-            const peeked = try self.peekNonBlankStrict(true) orelse break;
+            const peeked = try self.peekNonBlankInArray() orelse break;
 
             if (peeked.depth != base_depth + 1) {
                 if (peeked.depth <= base_depth) break;
@@ -469,7 +465,7 @@ pub const Decoder = struct {
         errdefer arr_builder.deinit();
 
         while (true) {
-            const peeked = try self.peekNonBlankStrict(true) orelse break;
+            const peeked = try self.peekNonBlankInArray() orelse break;
 
             if (peeked.depth != base_depth) {
                 if (peeked.depth < base_depth) break;
