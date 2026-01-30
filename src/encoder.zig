@@ -1,6 +1,6 @@
-//! TOON Encoder - Normalization
+//! TOON Encoder
 //!
-//! Number and value normalization for TOON encoding.
+//! Encoding primitives and normalization for TOON format.
 //! Per SPEC.md Section 2.1, numbers must be in canonical form.
 //!
 //! Canonical Form Requirements:
@@ -14,6 +14,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const value = @import("value.zig");
+const constants = @import("constants.zig");
+const string_utils = @import("shared/string_utils.zig");
+const validation = @import("shared/validation.zig");
 
 // ============================================================================
 // Number Normalization
@@ -189,6 +192,136 @@ pub fn isCanonicalNumber(s: []const u8) bool {
     }
 
     return true;
+}
+
+// ============================================================================
+// Primitive Encoding
+// ============================================================================
+
+/// Encode options for primitive values.
+pub const EncodeOptions = struct {
+    /// Active delimiter (affects quoting decisions for string values)
+    delimiter: constants.Delimiter = constants.default_delimiter,
+};
+
+/// Encodes a primitive Value to its TOON string representation.
+/// Returns a newly allocated string that the caller must free.
+///
+/// Per SPEC.md:
+/// - null -> "null"
+/// - bool -> "true" or "false"
+/// - number -> canonical form (via formatNumber), NaN/Infinity -> "null"
+/// - string -> quoted if needed, otherwise unquoted
+///
+/// Returns error if value is not a primitive (array/object).
+pub fn encodePrimitive(allocator: Allocator, val: value.Value, options: EncodeOptions) ![]u8 {
+    return switch (val) {
+        .null => allocator.dupe(u8, constants.null_literal),
+        .bool => |b| allocator.dupe(u8, if (b) constants.true_literal else constants.false_literal),
+        .number => |n| encodeNumber(allocator, n),
+        .string => |s| encodeString(allocator, s, options.delimiter),
+        .array, .object => error.InvalidJson,
+    };
+}
+
+/// Encodes a number to its canonical TOON representation.
+/// NaN/Infinity becomes "null".
+fn encodeNumber(allocator: Allocator, n: f64) Allocator.Error![]u8 {
+    if (formatNumber(allocator, n)) |maybe_str| {
+        return maybe_str orelse allocator.dupe(u8, constants.null_literal);
+    } else |err| {
+        return err;
+    }
+}
+
+/// Encodes a string value, quoting if necessary.
+/// Per SPEC.md Section 3.5, strings need quoting when they:
+/// - Contain the active delimiter
+/// - Contain double quotes or backslashes
+/// - Have leading/trailing whitespace
+/// - Look like a number, boolean, or null
+/// - Are empty
+/// - Start with '-' (list item marker)
+fn encodeString(allocator: Allocator, s: []const u8, delimiter: constants.Delimiter) Allocator.Error![]u8 {
+    if (validation.valueNeedsQuoting(s, delimiter)) {
+        return string_utils.quoteString(allocator, s);
+    }
+    return allocator.dupe(u8, s);
+}
+
+/// Encodes a key for TOON output.
+/// Per SPEC.md Section 3.2, keys matching ^[A-Za-z_][A-Za-z0-9_.]*$ are unquoted.
+/// All other keys must be quoted.
+pub fn encodeKey(allocator: Allocator, key: []const u8) Allocator.Error![]u8 {
+    if (validation.keyNeedsQuoting(key)) {
+        return string_utils.quoteString(allocator, key);
+    }
+    return allocator.dupe(u8, key);
+}
+
+/// Writes a primitive value directly to a writer.
+/// More efficient than allocating a string first.
+pub fn writePrimitive(writer: anytype, val: value.Value, options: EncodeOptions) !void {
+    switch (val) {
+        .null => try writer.writeAll(constants.null_literal),
+        .bool => |b| try writer.writeAll(if (b) constants.true_literal else constants.false_literal),
+        .number => |n| try writeNumber(writer, n),
+        .string => |s| try writeString(writer, s, options.delimiter),
+        .array, .object => return error.InvalidJson,
+    }
+}
+
+/// Writes a number directly to a writer in canonical form.
+fn writeNumber(writer: anytype, n: f64) !void {
+    if (std.math.isNan(n) or std.math.isInf(n)) {
+        try writer.writeAll(constants.null_literal);
+        return;
+    }
+
+    const num = if (n == 0.0 and std.math.signbit(n)) 0.0 else n;
+
+    if (@floor(num) == num and @abs(num) < max_safe_integer) {
+        const int_val: i64 = @intFromFloat(num);
+        try writer.print("{d}", .{int_val});
+    } else {
+        try writer.print("{d}", .{num});
+    }
+}
+
+/// Writes a string value directly to a writer, quoting if necessary.
+fn writeString(writer: anytype, s: []const u8, delimiter: constants.Delimiter) !void {
+    if (validation.valueNeedsQuoting(s, delimiter)) {
+        try writer.writeByte(constants.double_quote);
+        for (s) |c| {
+            if (constants.escapeChar(c)) |escaped| {
+                try writer.writeByte(constants.backslash);
+                try writer.writeByte(escaped);
+            } else {
+                try writer.writeByte(c);
+            }
+        }
+        try writer.writeByte(constants.double_quote);
+    } else {
+        try writer.writeAll(s);
+    }
+}
+
+/// Writes a key directly to a writer, quoting if necessary.
+pub fn writeKey(writer: anytype, key: []const u8) !void {
+    if (validation.keyNeedsQuoting(key)) {
+        try writer.writeByte(constants.double_quote);
+        for (key) |c| {
+            if (constants.escapeChar(c)) |escaped| {
+                try writer.writeByte(constants.backslash);
+                try writer.writeByte(escaped);
+            } else {
+                try writer.writeByte(c);
+            }
+        }
+        try writer.writeByte(constants.double_quote);
+    } else {
+        try writer.writeAll(key);
+    }
 }
 
 // ============================================================================
@@ -388,4 +521,249 @@ test "removeTrailingZeros" {
     const r4 = try removeTrailingZeros(allocator, "3.14");
     defer allocator.free(r4);
     try std.testing.expectEqualStrings("3.14", r4);
+}
+
+// ============================================================================
+// Encoder Primitive Tests
+// ============================================================================
+
+test "encodePrimitive null" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .null, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("null", result);
+}
+
+test "encodePrimitive bool true" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .bool = true }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("true", result);
+}
+
+test "encodePrimitive bool false" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .bool = false }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("false", result);
+}
+
+test "encodePrimitive number integer" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .number = 42.0 }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("42", result);
+}
+
+test "encodePrimitive number decimal" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .number = 3.14 }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("3.14", result);
+}
+
+test "encodePrimitive number NaN becomes null" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .number = std.math.nan(f64) }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("null", result);
+}
+
+test "encodePrimitive number Infinity becomes null" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .number = std.math.inf(f64) }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("null", result);
+}
+
+test "encodePrimitive number negative zero becomes zero" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .number = -0.0 }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("0", result);
+}
+
+test "encodePrimitive string unquoted" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "hello" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "encodePrimitive string quoted - empty" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"\"", result);
+}
+
+test "encodePrimitive string quoted - looks like null" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "null" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"null\"", result);
+}
+
+test "encodePrimitive string quoted - looks like number" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "123" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"123\"", result);
+}
+
+test "encodePrimitive string quoted - contains delimiter" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "a,b" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"a,b\"", result);
+}
+
+test "encodePrimitive string quoted - contains escape chars" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "line1\nline2" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"line1\\nline2\"", result);
+}
+
+test "encodePrimitive string quoted - leading whitespace" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = " leading" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\" leading\"", result);
+}
+
+test "encodePrimitive string quoted - starts with hyphen" {
+    const allocator = std.testing.allocator;
+    const result = try encodePrimitive(allocator, .{ .string = "-item" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"-item\"", result);
+}
+
+test "encodePrimitive string with pipe delimiter" {
+    const allocator = std.testing.allocator;
+    const opts = EncodeOptions{ .delimiter = .pipe };
+
+    // Comma is allowed with pipe delimiter
+    const with_comma = try encodePrimitive(allocator, .{ .string = "a,b" }, opts);
+    defer allocator.free(with_comma);
+    try std.testing.expectEqualStrings("a,b", with_comma);
+
+    // Pipe requires quoting
+    const with_pipe = try encodePrimitive(allocator, .{ .string = "a|b" }, opts);
+    defer allocator.free(with_pipe);
+    try std.testing.expectEqualStrings("\"a|b\"", with_pipe);
+}
+
+test "encodeKey unquoted" {
+    const allocator = std.testing.allocator;
+
+    const simple = try encodeKey(allocator, "name");
+    defer allocator.free(simple);
+    try std.testing.expectEqualStrings("name", simple);
+
+    const underscore = try encodeKey(allocator, "_private");
+    defer allocator.free(underscore);
+    try std.testing.expectEqualStrings("_private", underscore);
+
+    const dotted = try encodeKey(allocator, "config.host");
+    defer allocator.free(dotted);
+    try std.testing.expectEqualStrings("config.host", dotted);
+}
+
+test "encodeKey quoted" {
+    const allocator = std.testing.allocator;
+
+    const numeric = try encodeKey(allocator, "123");
+    defer allocator.free(numeric);
+    try std.testing.expectEqualStrings("\"123\"", numeric);
+
+    const hyphen = try encodeKey(allocator, "special-key");
+    defer allocator.free(hyphen);
+    try std.testing.expectEqualStrings("\"special-key\"", hyphen);
+
+    const space = try encodeKey(allocator, "has space");
+    defer allocator.free(space);
+    try std.testing.expectEqualStrings("\"has space\"", space);
+
+    const empty = try encodeKey(allocator, "");
+    defer allocator.free(empty);
+    try std.testing.expectEqualStrings("\"\"", empty);
+}
+
+test "encodeKey with special characters" {
+    const allocator = std.testing.allocator;
+
+    const with_newline = try encodeKey(allocator, "key\nvalue");
+    defer allocator.free(with_newline);
+    try std.testing.expectEqualStrings("\"key\\nvalue\"", with_newline);
+
+    const with_quote = try encodeKey(allocator, "say\"hello\"");
+    defer allocator.free(with_quote);
+    try std.testing.expectEqualStrings("\"say\\\"hello\\\"\"", with_quote);
+}
+
+test "writePrimitive null" {
+    var buf: [64]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try writePrimitive(stream.writer(), .null, .{});
+    try std.testing.expectEqualStrings("null", stream.getWritten());
+}
+
+test "writePrimitive bool" {
+    var buf: [64]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try writePrimitive(stream.writer(), .{ .bool = true }, .{});
+    try std.testing.expectEqualStrings("true", stream.getWritten());
+
+    stream.reset();
+    try writePrimitive(stream.writer(), .{ .bool = false }, .{});
+    try std.testing.expectEqualStrings("false", stream.getWritten());
+}
+
+test "writePrimitive number" {
+    var buf: [64]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try writePrimitive(stream.writer(), .{ .number = 42.0 }, .{});
+    try std.testing.expectEqualStrings("42", stream.getWritten());
+
+    stream.reset();
+    try writePrimitive(stream.writer(), .{ .number = 3.14 }, .{});
+    try std.testing.expectEqualStrings("3.14", stream.getWritten());
+
+    stream.reset();
+    try writePrimitive(stream.writer(), .{ .number = std.math.nan(f64) }, .{});
+    try std.testing.expectEqualStrings("null", stream.getWritten());
+}
+
+test "writePrimitive string" {
+    var buf: [64]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try writePrimitive(stream.writer(), .{ .string = "hello" }, .{});
+    try std.testing.expectEqualStrings("hello", stream.getWritten());
+
+    stream.reset();
+    try writePrimitive(stream.writer(), .{ .string = "" }, .{});
+    try std.testing.expectEqualStrings("\"\"", stream.getWritten());
+
+    stream.reset();
+    try writePrimitive(stream.writer(), .{ .string = "true" }, .{});
+    try std.testing.expectEqualStrings("\"true\"", stream.getWritten());
+}
+
+test "writeKey unquoted" {
+    var buf: [64]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try writeKey(stream.writer(), "name");
+    try std.testing.expectEqualStrings("name", stream.getWritten());
+}
+
+test "writeKey quoted" {
+    var buf: [64]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try writeKey(stream.writer(), "123key");
+    try std.testing.expectEqualStrings("\"123key\"", stream.getWritten());
+
+    stream.reset();
+    try writeKey(stream.writer(), "key\twith\ttabs");
+    try std.testing.expectEqualStrings("\"key\\twith\\ttabs\"", stream.getWritten());
 }
