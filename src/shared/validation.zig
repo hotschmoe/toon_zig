@@ -8,7 +8,6 @@
 const std = @import("std");
 const constants = @import("../constants.zig");
 const literal_utils = @import("literal_utils.zig");
-const string_utils = @import("string_utils.zig");
 
 // ============================================================================
 // Key Validation
@@ -77,7 +76,7 @@ pub fn isValidFoldablePath(s: []const u8) bool {
 // Value Quoting Requirements
 // ============================================================================
 
-/// Returns true if the string value is "safe" to use unquoted in TOON.
+/// Returns true if the string value is safe to use unquoted with a specific delimiter.
 /// Per SPEC.md Section 3.5, a string must be quoted when it:
 /// - Contains the active delimiter
 /// - Contains double quotes or backslashes
@@ -85,69 +84,34 @@ pub fn isValidFoldablePath(s: []const u8) bool {
 /// - Looks like a number, boolean, or null
 /// - Is empty string
 /// - Starts with '-' (list item marker)
-///
-/// This function checks all delimiter-independent conditions.
-/// Use `isSafeUnquotedWithDelimiter` for delimiter-aware checks.
-pub fn isSafeUnquoted(s: []const u8) bool {
-    // Empty string must be quoted
-    if (s.len == 0) return false;
-
-    // Starts with list marker must be quoted
-    if (s[0] == constants.list_marker) return false;
-
-    // Leading/trailing whitespace must be quoted
-    if (s[0] == constants.space or s[s.len - 1] == constants.space) return false;
-
-    // Check for characters that require quoting
-    for (s) |c| {
-        // Contains delimiter characters (any of the three)
-        if (c == constants.Delimiter.comma.char() or
-            c == constants.Delimiter.pipe.char() or
-            c == constants.Delimiter.tab.char())
-        {
-            return false;
-        }
-        // Contains quote or backslash
-        if (c == constants.double_quote or c == constants.backslash) {
-            return false;
-        }
-        // Contains newline or carriage return
-        if (c == constants.line_terminator or c == constants.carriage_return) {
-            return false;
-        }
-    }
-
-    // Looks like boolean, null, or number - must be quoted to be treated as string
-    if (literal_utils.isBooleanOrNullLiteral(s)) return false;
-    if (literal_utils.isNumericLike(s)) return false;
-
-    return true;
+pub fn isSafeUnquotedWithDelimiter(s: []const u8, delimiter: constants.Delimiter) bool {
+    return isSafeUnquotedCore(s, delimiter.char());
 }
 
-/// Returns true if the string value is safe to use unquoted with a specific delimiter.
-/// More permissive than `isSafeUnquoted` - only checks the active delimiter.
-pub fn isSafeUnquotedWithDelimiter(s: []const u8, delimiter: constants.Delimiter) bool {
-    // Empty string must be quoted
+/// Returns true if the string value is "safe" to use unquoted in TOON
+/// regardless of which delimiter is active (checks all three delimiters).
+/// Use `isSafeUnquotedWithDelimiter` for delimiter-aware checks.
+pub fn isSafeUnquoted(s: []const u8) bool {
+    return isSafeUnquotedCore(s, null);
+}
+
+/// Core implementation for unquoted value safety checks.
+/// If delim_char is null, checks against all three delimiter characters.
+fn isSafeUnquotedCore(s: []const u8, delim_char: ?u8) bool {
     if (s.len == 0) return false;
-
-    // Starts with list marker must be quoted
     if (s[0] == constants.list_marker) return false;
-
-    // Leading/trailing whitespace must be quoted
     if (s[0] == constants.space or s[s.len - 1] == constants.space) return false;
 
-    const delim_char = delimiter.char();
-
     for (s) |c| {
-        // Contains the active delimiter
-        if (c == delim_char) return false;
-        // Contains quote or backslash
+        if (delim_char) |dc| {
+            if (c == dc) return false;
+        } else {
+            if (c == ',' or c == '|' or c == '\t') return false;
+        }
         if (c == constants.double_quote or c == constants.backslash) return false;
-        // Contains newline or carriage return
         if (c == constants.line_terminator or c == constants.carriage_return) return false;
     }
 
-    // Looks like boolean, null, or number
     if (literal_utils.isBooleanOrNullLiteral(s)) return false;
     if (literal_utils.isNumericLike(s)) return false;
 
