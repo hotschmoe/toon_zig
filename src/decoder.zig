@@ -484,6 +484,186 @@ pub const Decoder = struct {
 };
 
 // ============================================================================
+// Event Builder
+// ============================================================================
+
+/// Streaming event builder that converts TOON input to JsonStreamEvent sequence.
+/// This enables streaming pipelines and event-based processing.
+///
+/// The event sequence follows:
+/// - Object: start_object -> (key, value events)* -> end_object
+/// - Array: start_array -> (value events)* -> end_array
+/// - Primitive: primitive event
+///
+/// Usage:
+/// ```
+/// var builder = EventBuilder.init(allocator, input, .{});
+/// defer builder.deinit();
+/// while (try builder.next()) |event| {
+///     defer event.deinit(allocator);
+///     // process event...
+/// }
+/// ```
+pub const EventBuilder = struct {
+    allocator: Allocator,
+    decoder: Decoder,
+    root_value: ?value.Value,
+    event_stack: std.ArrayListUnmanaged(StackFrame),
+    started: bool,
+    finished: bool,
+
+    const StackFrame = struct {
+        value_ptr: *const value.Value,
+        state: FrameState,
+        index: usize,
+    };
+
+    const FrameState = enum {
+        start,
+        iterating,
+        done,
+    };
+
+    const Self = @This();
+
+    /// Initialize a new event builder.
+    pub fn init(allocator: Allocator, input: []const u8, options: stream.DecodeOptions) Self {
+        return .{
+            .allocator = allocator,
+            .decoder = Decoder.init(allocator, input, options),
+            .root_value = null,
+            .event_stack = .{},
+            .started = false,
+            .finished = false,
+        };
+    }
+
+    /// Get the next event, or null if no more events.
+    /// Caller owns the returned event and must call deinit on it.
+    pub fn next(self: *Self) errors.Error!?stream.JsonStreamEvent {
+        if (self.finished) return null;
+
+        // First call: decode the entire input and start iteration
+        if (!self.started) {
+            self.root_value = try self.decoder.decode();
+            self.started = true;
+
+            // Push root value onto stack
+            const root_ptr = &self.root_value.?;
+            self.event_stack.append(self.allocator, .{
+                .value_ptr = root_ptr,
+                .state = .start,
+                .index = 0,
+            }) catch return errors.Error.OutOfMemory;
+        }
+
+        return self.nextEvent();
+    }
+
+    fn nextEvent(self: *Self) errors.Error!?stream.JsonStreamEvent {
+        while (self.event_stack.items.len > 0) {
+            const frame = &self.event_stack.items[self.event_stack.items.len - 1];
+            const val = frame.value_ptr.*;
+
+            switch (frame.state) {
+                .start => {
+                    frame.state = .iterating;
+                    switch (val) {
+                        .object => |obj| {
+                            return .{ .start_object = .{ .count = obj.count() } };
+                        },
+                        .array => |arr| {
+                            return .{ .start_array = .{ .count = arr.len() } };
+                        },
+                        else => {
+                            // Primitive - emit and mark done
+                            frame.state = .done;
+                            return try self.emitPrimitive(val);
+                        },
+                    }
+                },
+                .iterating => {
+                    switch (val) {
+                        .object => |obj| {
+                            if (frame.index < obj.entries.len) {
+                                const entry = &obj.entries[frame.index];
+                                frame.index += 1;
+
+                                // Emit key event
+                                const key = self.allocator.dupe(u8, entry.key) catch return errors.Error.OutOfMemory;
+
+                                // Push child value for next iteration
+                                self.event_stack.append(self.allocator, .{
+                                    .value_ptr = &entry.value,
+                                    .state = .start,
+                                    .index = 0,
+                                }) catch {
+                                    self.allocator.free(key);
+                                    return errors.Error.OutOfMemory;
+                                };
+
+                                return .{ .key = key };
+                            } else {
+                                frame.state = .done;
+                                return .end_object;
+                            }
+                        },
+                        .array => |arr| {
+                            if (frame.index < arr.items.len) {
+                                const item = &arr.items[frame.index];
+                                frame.index += 1;
+
+                                // Push child value for next iteration
+                                self.event_stack.append(self.allocator, .{
+                                    .value_ptr = item,
+                                    .state = .start,
+                                    .index = 0,
+                                }) catch return errors.Error.OutOfMemory;
+
+                                continue; // Process the pushed frame
+                            } else {
+                                frame.state = .done;
+                                return .end_array;
+                            }
+                        },
+                        else => {
+                            frame.state = .done;
+                            continue;
+                        },
+                    }
+                },
+                .done => {
+                    _ = self.event_stack.pop();
+                    continue;
+                },
+            }
+        }
+
+        self.finished = true;
+        return null;
+    }
+
+    fn emitPrimitive(self: *Self, val: value.Value) errors.Error!stream.JsonStreamEvent {
+        return switch (val) {
+            .null => .{ .primitive = .null },
+            .bool => |b| .{ .primitive = .{ .bool = b } },
+            .number => |n| .{ .primitive = .{ .number = n } },
+            .string => |s| .{ .primitive = .{ .string = self.allocator.dupe(u8, s) catch return errors.Error.OutOfMemory } },
+            .array, .object => unreachable,
+        };
+    }
+
+    /// Free resources.
+    pub fn deinit(self: *Self) void {
+        self.decoder.deinit();
+        if (self.root_value) |*v| {
+            v.deinit(self.allocator);
+        }
+        self.event_stack.deinit(self.allocator);
+    }
+};
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -499,6 +679,32 @@ pub fn decodeWithOptions(allocator: Allocator, input: []const u8, options: strea
     var decoder = Decoder.init(allocator, input, options);
     defer decoder.deinit();
     return try decoder.decode();
+}
+
+/// Decode TOON input to a stream of events.
+/// Returns a slice of events that the caller owns and must free.
+/// Each event in the slice must have deinit called, then the slice itself freed.
+pub fn decodeToEvents(allocator: Allocator, input: []const u8) errors.Error![]stream.JsonStreamEvent {
+    return decodeToEventsWithOptions(allocator, input, .{});
+}
+
+/// Decode TOON input to a stream of events with custom options.
+/// Returns a slice of events that the caller owns and must free.
+pub fn decodeToEventsWithOptions(allocator: Allocator, input: []const u8, options: stream.DecodeOptions) errors.Error![]stream.JsonStreamEvent {
+    var builder = EventBuilder.init(allocator, input, options);
+    defer builder.deinit();
+
+    var events: std.ArrayListUnmanaged(stream.JsonStreamEvent) = .{};
+    errdefer {
+        for (events.items) |*e| e.deinit(allocator);
+        events.deinit(allocator);
+    }
+
+    while (try builder.next()) |event| {
+        events.append(allocator, event) catch return errors.Error.OutOfMemory;
+    }
+
+    return events.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
 }
 
 // ============================================================================
@@ -971,4 +1177,233 @@ test "decode blank line in array allowed in lenient mode" {
     try std.testing.expect(arr.get(0).?.eql(.{ .string = "first" }));
     try std.testing.expect(arr.get(1).?.eql(.{ .string = "second" }));
     try std.testing.expect(arr.get(2).?.eql(.{ .string = "third" }));
+}
+
+// ============================================================================
+// Event Builder Tests
+// ============================================================================
+
+test "EventBuilder - simple object" {
+    const allocator = std.testing.allocator;
+    const events = try decodeToEvents(allocator, "a: 1\n");
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // Expected: start_object(1), key("a"), primitive(1), end_object
+    try std.testing.expectEqual(@as(usize, 4), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[1].eql(.{ .key = "a" }));
+    try std.testing.expect(events[2].eql(.{ .primitive = .{ .number = 1.0 } }));
+    try std.testing.expect(events[3].eql(.end_object));
+}
+
+test "EventBuilder - simple array" {
+    const allocator = std.testing.allocator;
+    const events = try decodeToEvents(allocator, "[3]: 1,2,3\n");
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // Expected: start_array(3), primitive(1), primitive(2), primitive(3), end_array
+    try std.testing.expectEqual(@as(usize, 5), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_array = .{ .count = 3 } }));
+    try std.testing.expect(events[1].eql(.{ .primitive = .{ .number = 1.0 } }));
+    try std.testing.expect(events[2].eql(.{ .primitive = .{ .number = 2.0 } }));
+    try std.testing.expect(events[3].eql(.{ .primitive = .{ .number = 3.0 } }));
+    try std.testing.expect(events[4].eql(.end_array));
+}
+
+test "EventBuilder - nested object" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\outer:
+        \\  inner: value
+        \\
+    ;
+    const events = try decodeToEvents(allocator, input);
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // Expected: start_object(1), key("outer"), start_object(1), key("inner"), primitive("value"), end_object, end_object
+    try std.testing.expectEqual(@as(usize, 7), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[1].eql(.{ .key = "outer" }));
+    try std.testing.expect(events[2].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[3].eql(.{ .key = "inner" }));
+    try std.testing.expect(events[4].eql(.{ .primitive = .{ .string = "value" } }));
+    try std.testing.expect(events[5].eql(.end_object));
+    try std.testing.expect(events[6].eql(.end_object));
+}
+
+test "EventBuilder - array with objects" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\users[2]{id,name}:
+        \\  1,Alice
+        \\  2,Bob
+        \\
+    ;
+    const events = try decodeToEvents(allocator, input);
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // Expected:
+    // start_object(1), key("users"), start_array(2),
+    //   start_object(2), key("id"), primitive(1), key("name"), primitive("Alice"), end_object,
+    //   start_object(2), key("id"), primitive(2), key("name"), primitive("Bob"), end_object,
+    // end_array, end_object
+    try std.testing.expectEqual(@as(usize, 17), events.len);
+
+    // Root object
+    try std.testing.expect(events[0].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[1].eql(.{ .key = "users" }));
+    try std.testing.expect(events[2].eql(.{ .start_array = .{ .count = 2 } }));
+
+    // First row
+    try std.testing.expect(events[3].eql(.{ .start_object = .{ .count = 2 } }));
+    try std.testing.expect(events[4].eql(.{ .key = "id" }));
+    try std.testing.expect(events[5].eql(.{ .primitive = .{ .number = 1.0 } }));
+    try std.testing.expect(events[6].eql(.{ .key = "name" }));
+    try std.testing.expect(events[7].eql(.{ .primitive = .{ .string = "Alice" } }));
+    try std.testing.expect(events[8].eql(.end_object));
+
+    // Second row
+    try std.testing.expect(events[9].eql(.{ .start_object = .{ .count = 2 } }));
+    try std.testing.expect(events[10].eql(.{ .key = "id" }));
+    try std.testing.expect(events[11].eql(.{ .primitive = .{ .number = 2.0 } }));
+    try std.testing.expect(events[12].eql(.{ .key = "name" }));
+    try std.testing.expect(events[13].eql(.{ .primitive = .{ .string = "Bob" } }));
+    try std.testing.expect(events[14].eql(.end_object));
+
+    try std.testing.expect(events[15].eql(.end_array));
+    try std.testing.expect(events[16].eql(.end_object));
+}
+
+test "EventBuilder - primitive types" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\str: hello
+        \\num: 42
+        \\bool: true
+        \\nil: null
+        \\
+    ;
+    const events = try decodeToEvents(allocator, input);
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // start_object(4) + 4*(key + primitive) + end_object = 10
+    try std.testing.expectEqual(@as(usize, 10), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_object = .{ .count = 4 } }));
+
+    try std.testing.expect(events[1].eql(.{ .key = "str" }));
+    try std.testing.expect(events[2].eql(.{ .primitive = .{ .string = "hello" } }));
+
+    try std.testing.expect(events[3].eql(.{ .key = "num" }));
+    try std.testing.expect(events[4].eql(.{ .primitive = .{ .number = 42.0 } }));
+
+    try std.testing.expect(events[5].eql(.{ .key = "bool" }));
+    try std.testing.expect(events[6].eql(.{ .primitive = .{ .bool = true } }));
+
+    try std.testing.expect(events[7].eql(.{ .key = "nil" }));
+    try std.testing.expect(events[8].eql(.{ .primitive = .null }));
+
+    try std.testing.expect(events[9].eql(.end_object));
+}
+
+test "EventBuilder - empty object" {
+    const allocator = std.testing.allocator;
+    const events = try decodeToEvents(allocator, "");
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // Empty input -> empty object
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_object = .{ .count = 0 } }));
+    try std.testing.expect(events[1].eql(.end_object));
+}
+
+test "EventBuilder - empty array" {
+    const allocator = std.testing.allocator;
+    const events = try decodeToEvents(allocator, "[0]:\n");
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_array = .{ .count = 0 } }));
+    try std.testing.expect(events[1].eql(.end_array));
+}
+
+test "EventBuilder - single primitive" {
+    const allocator = std.testing.allocator;
+    const events = try decodeToEvents(allocator, "42");
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expect(events[0].eql(.{ .primitive = .{ .number = 42.0 } }));
+}
+
+test "EventBuilder - deeply nested" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\a:
+        \\  b:
+        \\    c: value
+        \\
+    ;
+    const events = try decodeToEvents(allocator, input);
+    defer {
+        for (events) |*e| @constCast(e).deinit(allocator);
+        allocator.free(events);
+    }
+
+    // start_object(1), key("a"),
+    //   start_object(1), key("b"),
+    //     start_object(1), key("c"), primitive("value"), end_object,
+    //   end_object,
+    // end_object
+    try std.testing.expectEqual(@as(usize, 10), events.len);
+    try std.testing.expect(events[0].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[1].eql(.{ .key = "a" }));
+    try std.testing.expect(events[2].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[3].eql(.{ .key = "b" }));
+    try std.testing.expect(events[4].eql(.{ .start_object = .{ .count = 1 } }));
+    try std.testing.expect(events[5].eql(.{ .key = "c" }));
+    try std.testing.expect(events[6].eql(.{ .primitive = .{ .string = "value" } }));
+    try std.testing.expect(events[7].eql(.end_object));
+    try std.testing.expect(events[8].eql(.end_object));
+    try std.testing.expect(events[9].eql(.end_object));
+}
+
+test "EventBuilder iterator interface" {
+    const allocator = std.testing.allocator;
+    var builder = EventBuilder.init(allocator, "a: 1\n", .{});
+    defer builder.deinit();
+
+    var event_count: usize = 0;
+    while (try builder.next()) |event| {
+        defer @constCast(&event).deinit(allocator);
+        event_count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), event_count);
+
+    // Calling next again should return null
+    try std.testing.expectEqual(@as(?stream.JsonStreamEvent, null), try builder.next());
 }
