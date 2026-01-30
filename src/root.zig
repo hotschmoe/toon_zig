@@ -9,6 +9,7 @@ const std = @import("std");
 pub const constants = @import("constants.zig");
 pub const errors = @import("errors.zig");
 pub const value = @import("value.zig");
+pub const stream = @import("stream.zig");
 pub const literal_utils = @import("shared/literal_utils.zig");
 pub const string_utils = @import("shared/string_utils.zig");
 pub const validation = @import("shared/validation.zig");
@@ -29,6 +30,11 @@ pub const Array = value.Array;
 pub const Object = value.Object;
 pub const ArrayBuilder = value.ArrayBuilder;
 pub const ObjectBuilder = value.ObjectBuilder;
+
+// Re-export commonly used types from stream
+pub const JsonStreamEvent = stream.JsonStreamEvent;
+pub const EncodeOptions = stream.EncodeOptions;
+pub const DecodeOptions = stream.DecodeOptions;
 
 test {
     // Run tests from all imported modules
