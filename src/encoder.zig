@@ -426,46 +426,48 @@ fn encodeKeyValuePair(writer: anytype, key: []const u8, val: value.Value, depth:
     }
 }
 
-/// Try to fold a key-value pair where value is a single-key object chain.
-/// Returns true if folding was performed.
-fn tryFoldKeyValue(writer: anytype, key: []const u8, val: value.Value, depth: usize, options: FullEncodeOptions) bool {
+/// Result of attempting to build a folded key path.
+const FoldResult = struct {
+    key_len: usize,
+    final_value: value.Value,
+};
+
+/// Attempt to build a folded key path from a single-key object chain.
+/// Returns null if folding is not possible.
+fn buildFoldedKey(key: []const u8, val: value.Value, depth: usize, max_depth: usize, buf: []u8) ?FoldResult {
+    if (!validation.isValidIdentifierSegment(key)) return null;
+    if (key.len >= buf.len) return null;
+
     const obj = switch (val) {
         .object => |o| o,
-        else => return false,
+        else => return null,
     };
+    if (obj.count() != 1) return null;
 
-    if (obj.count() != 1) return false;
-
-    const entry = obj.entries[0];
-    if (!validation.isValidIdentifierSegment(entry.key)) return false;
-
-    // Build folded key path
-    var folded_key_buf: [512]u8 = undefined;
-    var folded_key_len: usize = 0;
+    const first_entry = obj.entries[0];
+    if (!validation.isValidIdentifierSegment(first_entry.key)) return null;
 
     // Copy first key
-    if (!validation.isValidIdentifierSegment(key)) return false;
-    if (key.len >= folded_key_buf.len) return false;
-    @memcpy(folded_key_buf[0..key.len], key);
-    folded_key_len = key.len;
+    @memcpy(buf[0..key.len], key);
+    var key_len = key.len;
 
-    // Collect the chain
-    var current_val = entry.value;
-    var current_key = entry.key;
+    // Walk the chain
+    var current_key = first_entry.key;
+    var current_val = first_entry.value;
     var chain_depth: usize = 1;
 
-    while (chain_depth < options.flatten_depth - depth) {
-        if (folded_key_len + 1 + current_key.len >= folded_key_buf.len) break;
-        folded_key_buf[folded_key_len] = constants.path_separator;
-        folded_key_len += 1;
-        @memcpy(folded_key_buf[folded_key_len..][0..current_key.len], current_key);
-        folded_key_len += current_key.len;
+    while (chain_depth < max_depth - depth) {
+        if (key_len + 1 + current_key.len >= buf.len) break;
+
+        buf[key_len] = constants.path_separator;
+        key_len += 1;
+        @memcpy(buf[key_len..][0..current_key.len], current_key);
+        key_len += current_key.len;
 
         const next_obj = switch (current_val) {
             .object => |o| o,
             else => break,
         };
-
         if (next_obj.count() != 1) break;
 
         const next_entry = next_obj.entries[0];
@@ -476,28 +478,19 @@ fn tryFoldKeyValue(writer: anytype, key: []const u8, val: value.Value, depth: us
         chain_depth += 1;
     }
 
-    // Now write the folded entry
-    const folded_key = folded_key_buf[0..folded_key_len];
+    return .{ .key_len = key_len, .final_value = current_val };
+}
+
+/// Write a folded key-value pair. Returns true if folding was performed.
+fn tryFoldKeyValue(writer: anytype, key: []const u8, val: value.Value, depth: usize, options: FullEncodeOptions) bool {
+    var buf: [512]u8 = undefined;
+    const result = buildFoldedKey(key, val, depth, options.flatten_depth, &buf) orelse return false;
+    const folded_key = buf[0..result.key_len];
+
+    // Write the folded entry (errors mean we can't fold)
     writeIndent(writer, depth, options.indent) catch return false;
     writeKey(writer, folded_key) catch return false;
-
-    switch (current_val) {
-        .null, .bool, .number, .string => {
-            writer.writeAll(": ") catch return false;
-            writePrimitive(writer, current_val, .{ .delimiter = options.delimiter }) catch return false;
-            writer.writeByte(constants.line_terminator) catch return false;
-        },
-        .array => |inner_arr| {
-            encodeArrayHeader(writer, null, inner_arr, depth, options) catch return false;
-            encodeArrayBody(writer, inner_arr, depth + 1, options) catch return false;
-        },
-        .object => |inner_obj| {
-            writer.writeAll(":\n") catch return false;
-            for (inner_obj.entries) |e| {
-                encodeKeyValuePair(writer, e.key, e.value, depth + 1, options) catch return false;
-            }
-        },
-    }
+    writeKeyValue(writer, result.final_value, depth + 1, options) catch return false;
 
     return true;
 }
@@ -590,38 +583,43 @@ fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: Ful
             try writer.writeByte(constants.line_terminator);
         },
         .array => |arr| {
-            // Nested array as list item
             try encodeArrayHeader(writer, null, arr, depth, options);
             try encodeArrayBody(writer, arr, depth + 1, options);
         },
         .object => |obj| {
             if (obj.count() == 0) {
                 try writer.writeByte(constants.line_terminator);
-            } else {
-                // First key on same line
-                const first = obj.entries[0];
-                try writeKey(writer, first.key);
-                switch (first.value) {
-                    .null, .bool, .number, .string => {
-                        try writer.writeAll(": ");
-                        try writePrimitive(writer, first.value, .{ .delimiter = options.delimiter });
-                        try writer.writeByte(constants.line_terminator);
-                    },
-                    .array => |arr| {
-                        try encodeArrayHeader(writer, null, arr, depth, options);
-                        try encodeArrayBody(writer, arr, depth + 2, options);
-                    },
-                    .object => |inner_obj| {
-                        try writer.writeAll(":\n");
-                        for (inner_obj.entries) |entry| {
-                            try encodeKeyValuePair(writer, entry.key, entry.value, depth + 2, options);
-                        }
-                    },
-                }
-                // Remaining keys at depth + 1
-                for (obj.entries[1..]) |entry| {
-                    try encodeKeyValuePair(writer, entry.key, entry.value, depth + 1, options);
-                }
+                return;
+            }
+            // First key on same line as list marker
+            const first = obj.entries[0];
+            try writeKey(writer, first.key);
+            try writeKeyValue(writer, first.value, depth + 2, options);
+            // Remaining keys at depth + 1
+            for (obj.entries[1..]) |entry| {
+                try encodeKeyValuePair(writer, entry.key, entry.value, depth + 1, options);
+            }
+        },
+    }
+}
+
+/// Write the value portion of a key-value pair (after the key has been written).
+/// Handles primitives, arrays, and nested objects.
+fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, options: FullEncodeOptions) !void {
+    switch (val) {
+        .null, .bool, .number, .string => {
+            try writer.writeAll(": ");
+            try writePrimitive(writer, val, .{ .delimiter = options.delimiter });
+            try writer.writeByte(constants.line_terminator);
+        },
+        .array => |arr| {
+            try encodeArrayHeader(writer, null, arr, content_depth - 1, options);
+            try encodeArrayBody(writer, arr, content_depth, options);
+        },
+        .object => |obj| {
+            try writer.writeAll(":\n");
+            for (obj.entries) |entry| {
+                try encodeKeyValuePair(writer, entry.key, entry.value, content_depth, options);
             }
         },
     }
@@ -630,14 +628,6 @@ fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: Ful
 // ----------------------------------------------------------------------------
 // Type predicates
 // ----------------------------------------------------------------------------
-
-/// Returns true if all items are primitives (suitable for inline encoding).
-fn isArrayOfPrimitives(arr: value.Array) bool {
-    for (arr.items) |item| {
-        if (!item.isPrimitive()) return false;
-    }
-    return true;
-}
 
 /// Returns true if all items are objects with the same keys in the same order.
 fn isArrayOfHomogeneousObjects(arr: value.Array) bool {
@@ -664,9 +654,11 @@ fn isArrayOfHomogeneousObjects(arr: value.Array) bool {
     return true;
 }
 
-/// Returns true if the array can be encoded inline.
 fn isInlineableArray(arr: value.Array) bool {
-    return isArrayOfPrimitives(arr);
+    for (arr.items) |item| {
+        if (!item.isPrimitive()) return false;
+    }
+    return true;
 }
 
 /// Extract field names if array is suitable for tabular encoding.
@@ -1355,17 +1347,17 @@ test "jsonToToon nested" {
     try std.testing.expectEqualStrings("config:\n  port: 8080\n", result);
 }
 
-test "isArrayOfPrimitives" {
+test "isInlineableArray" {
     const allocator = std.testing.allocator;
 
     // All primitives
     const items1 = [_]value.Value{ .{ .number = 1.0 }, .{ .bool = true }, .null };
     var arr1 = try value.Array.fromSlice(allocator, &items1);
     defer arr1.deinit(allocator);
-    try std.testing.expect(isArrayOfPrimitives(arr1));
+    try std.testing.expect(isInlineableArray(arr1));
 
     // Empty is primitive
-    try std.testing.expect(isArrayOfPrimitives(value.Array.init()));
+    try std.testing.expect(isInlineableArray(value.Array.init()));
 }
 
 test "isArrayOfHomogeneousObjects" {

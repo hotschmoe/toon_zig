@@ -122,23 +122,13 @@ fn writeOutput(path: ?[]const u8, data: []const u8) !void {
         defer file.close();
         try file.writeAll(data);
     } else {
-        // Write to stdout using buffered writer
-        var buf: [4096]u8 = undefined;
-        var writer = std.fs.File.stdout().writer(&buf);
-        try writer.interface.writeAll(data);
-        try writer.interface.flush();
+        try std.io.getStdOut().writeAll(data);
     }
 }
 
 // ============================================================================
 // Statistics
 // ============================================================================
-
-fn estimateTokens(text: []const u8) usize {
-    // Rough estimation: ~4 characters per token for typical text
-    // This is a very rough approximation
-    return (text.len + 3) / 4;
-}
 
 fn printStats(stderr: anytype, input_size: usize, output_size: usize) void {
     const input_tokens = (input_size + 3) / 4;
@@ -363,10 +353,4 @@ test "parseArgs version" {
     const argv = [_][:0]const u8{ "tzu", "-v" };
     const args = try parseArgs(std.testing.allocator, &argv);
     try std.testing.expectEqual(Mode.version, args.mode);
-}
-
-test "estimateTokens" {
-    try std.testing.expectEqual(@as(usize, 3), estimateTokens("hello world"));
-    try std.testing.expectEqual(@as(usize, 0), estimateTokens(""));
-    try std.testing.expectEqual(@as(usize, 1), estimateTokens("abc"));
 }

@@ -863,56 +863,48 @@ fn insertPathEntry(builder: *value.ObjectBuilder, allocator: Allocator, path: []
     var iter = std.mem.splitScalar(u8, path, constants.path_separator);
     const first_segment = iter.next() orelse return;
 
-    // Get remaining path
     const rest = iter.rest();
     if (rest.len == 0) {
-        // No more segments, just add the value
         try builder.put(first_segment, val);
         return;
     }
 
-    // Need to create or merge with nested object
+    // Find existing entry index (if any)
+    const existing_idx = findEntryIndex(builder, first_segment);
+
+    // Build nested object, merging with existing if present
     var nested_builder = value.ObjectBuilder.init(allocator);
     errdefer nested_builder.deinit();
 
-    // Check if we already have this key
-    var existing_found = false;
-    for (builder.entries.items) |entry| {
-        if (std.mem.eql(u8, entry.key, first_segment)) {
-            existing_found = true;
-            // If it's an object, copy its contents
-            if (entry.value == .object) {
-                for (entry.value.object.entries) |e| {
-                    var cloned = try e.value.clone(allocator);
-                    errdefer cloned.deinit(allocator);
-                    nested_builder.put(e.key, cloned) catch return errors.Error.OutOfMemory;
-                }
+    if (existing_idx) |idx| {
+        const existing = builder.entries.items[idx].value;
+        if (existing == .object) {
+            for (existing.object.entries) |e| {
+                var cloned = try e.value.clone(allocator);
+                errdefer cloned.deinit(allocator);
+                nested_builder.put(e.key, cloned) catch return errors.Error.OutOfMemory;
             }
-            break;
         }
     }
 
-    // Insert the rest of the path into nested builder
     try insertPathEntry(&nested_builder, allocator, rest, val);
-
     const nested_obj = nested_builder.toOwnedObject();
 
-    if (existing_found) {
-        // Remove old entry and add new one
-        // Find and remove the existing entry
-        var i: usize = 0;
-        while (i < builder.entries.items.len) {
-            if (std.mem.eql(u8, builder.entries.items[i].key, first_segment)) {
-                const entry = builder.entries.orderedRemove(i);
-                allocator.free(entry.key);
-                @constCast(&entry.value).deinit(allocator);
-                break;
-            }
-            i += 1;
-        }
+    // Remove old entry if it existed
+    if (existing_idx) |idx| {
+        const entry = builder.entries.orderedRemove(idx);
+        allocator.free(entry.key);
+        @constCast(&entry.value).deinit(allocator);
     }
 
     builder.put(first_segment, .{ .object = nested_obj }) catch return errors.Error.OutOfMemory;
+}
+
+fn findEntryIndex(builder: *value.ObjectBuilder, key: []const u8) ?usize {
+    for (builder.entries.items, 0..) |entry, i| {
+        if (std.mem.eql(u8, entry.key, key)) return i;
+    }
+    return null;
 }
 
 /// Decode TOON with path expansion.
