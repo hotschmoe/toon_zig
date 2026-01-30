@@ -10,6 +10,7 @@ pub const constants = @import("constants.zig");
 pub const errors = @import("errors.zig");
 pub const value = @import("value.zig");
 pub const stream = @import("stream.zig");
+pub const scanner = @import("scanner.zig");
 pub const literal_utils = @import("shared/literal_utils.zig");
 pub const string_utils = @import("shared/string_utils.zig");
 pub const validation = @import("shared/validation.zig");
@@ -35,6 +36,12 @@ pub const ObjectBuilder = value.ObjectBuilder;
 pub const JsonStreamEvent = stream.JsonStreamEvent;
 pub const EncodeOptions = stream.EncodeOptions;
 pub const DecodeOptions = stream.DecodeOptions;
+
+// Re-export commonly used types from scanner
+pub const Scanner = scanner.Scanner;
+pub const ScannedLine = scanner.ScannedLine;
+pub const LineType = scanner.LineType;
+pub const ArrayHeader = scanner.ArrayHeader;
 
 test {
     // Run tests from all imported modules
