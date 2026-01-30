@@ -100,6 +100,21 @@ pub const Decoder = struct {
         }
     }
 
+    /// Peek at the next non-blank line, but reject blank lines in strict mode.
+    /// Used for array content where SPEC.md Section 7 forbids blank lines.
+    fn peekNonBlankStrict(self: *Self, in_array: bool) errors.Error!?scanner.ScannedLine {
+        while (true) {
+            const line = try self.peekLine() orelse return null;
+            if (line.line_type != .blank) return line;
+            // In strict mode, blank lines within arrays are an error
+            if (self.options.strict and in_array) {
+                return errors.Error.BlankLineInArray;
+            }
+            // Consume and discard the blank line
+            self.discardPeeked();
+        }
+    }
+
     /// Consume the peeked line and return it (ownership transferred to caller).
     /// Caller is responsible for calling deinit on the returned line.
     fn consumePeeked(self: *Self) ?scanner.ScannedLine {
@@ -280,7 +295,7 @@ pub const Decoder = struct {
 
         var row_count: usize = 0;
         while (true) {
-            const peeked = try self.peekNonBlank() orelse break;
+            const peeked = try self.peekNonBlankStrict(true) orelse break;
             if (peeked.depth != base_depth + 1 or peeked.line_type != .tabular_row) break;
 
             var line = self.consumePeeked().?;
@@ -326,7 +341,7 @@ pub const Decoder = struct {
 
         var item_count: usize = 0;
         while (true) {
-            const peeked = try self.peekNonBlank() orelse break;
+            const peeked = try self.peekNonBlankStrict(true) orelse break;
 
             if (peeked.depth != base_depth + 1) {
                 if (peeked.depth <= base_depth) break;
@@ -454,7 +469,7 @@ pub const Decoder = struct {
         errdefer arr_builder.deinit();
 
         while (true) {
-            const peeked = try self.peekNonBlank() orelse break;
+            const peeked = try self.peekNonBlankStrict(true) orelse break;
 
             if (peeked.depth != base_depth) {
                 if (peeked.depth < base_depth) break;
@@ -912,4 +927,52 @@ test "decode array with quoted values containing delimiter" {
     try std.testing.expectEqual(@as(usize, 2), arr.len());
     try std.testing.expect(arr.get(0).?.eql(.{ .string = "a,b" }));
     try std.testing.expect(arr.get(1).?.eql(.{ .string = "c" }));
+}
+
+test "decode blank line in expanded array strict mode" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\items[3]:
+        \\  - first
+        \\
+        \\  - second
+        \\  - third
+        \\
+    ;
+    const result = decodeWithOptions(allocator, input, .{ .strict = true });
+    try std.testing.expectError(errors.Error.BlankLineInArray, result);
+}
+
+test "decode blank line in tabular array strict mode" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\users[3]{id,name}:
+        \\  1,Alice
+        \\
+        \\  2,Bob
+        \\  3,Carol
+        \\
+    ;
+    const result = decodeWithOptions(allocator, input, .{ .strict = true });
+    try std.testing.expectError(errors.Error.BlankLineInArray, result);
+}
+
+test "decode blank line in array allowed in lenient mode" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\items[3]:
+        \\  - first
+        \\
+        \\  - second
+        \\  - third
+        \\
+    ;
+    var result = try decodeWithOptions(allocator, input, .{ .strict = false });
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("items").?.array;
+    try std.testing.expectEqual(@as(usize, 3), arr.len());
+    try std.testing.expect(arr.get(0).?.eql(.{ .string = "first" }));
+    try std.testing.expect(arr.get(1).?.eql(.{ .string = "second" }));
+    try std.testing.expect(arr.get(2).?.eql(.{ .string = "third" }));
 }
