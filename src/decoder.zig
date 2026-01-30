@@ -804,6 +804,139 @@ fn writeJsonNumber(writer: anytype, n: f64) @TypeOf(writer).Error!void {
 }
 
 // ============================================================================
+// Path Expansion
+// ============================================================================
+
+const validation = @import("shared/validation.zig");
+
+/// Expand dotted keys in a value tree.
+/// For example, `{"a.b.c": 1}` becomes `{"a": {"b": {"c": 1}}}`.
+/// Only expands keys that are valid foldable paths.
+pub fn expandPaths(allocator: Allocator, val: value.Value) errors.Error!value.Value {
+    return switch (val) {
+        .object => |obj| expandObjectPaths(allocator, obj),
+        .array => |arr| expandArrayPaths(allocator, arr),
+        else => val.clone(allocator) catch return errors.Error.OutOfMemory,
+    };
+}
+
+fn expandObjectPaths(allocator: Allocator, obj: value.Object) errors.Error!value.Value {
+    var builder = value.ObjectBuilder.init(allocator);
+    errdefer builder.deinit();
+
+    for (obj.entries) |entry| {
+        // Recursively expand nested values first
+        var expanded_value = try expandPaths(allocator, entry.value);
+        errdefer expanded_value.deinit(allocator);
+
+        // Check if key is a valid foldable path with dots
+        if (std.mem.indexOfScalar(u8, entry.key, constants.path_separator) != null and
+            validation.isValidFoldablePath(entry.key))
+        {
+            // Split and insert nested
+            try insertPathEntry(&builder, allocator, entry.key, expanded_value);
+        } else {
+            // Plain key, just add it
+            try builder.put(entry.key, expanded_value);
+        }
+    }
+
+    return .{ .object = builder.toOwnedObject() };
+}
+
+fn expandArrayPaths(allocator: Allocator, arr: value.Array) errors.Error!value.Value {
+    var builder = value.ArrayBuilder.init(allocator);
+    errdefer builder.deinit();
+
+    for (arr.items) |item| {
+        var expanded = try expandPaths(allocator, item);
+        errdefer expanded.deinit(allocator);
+        try builder.append(expanded);
+    }
+
+    return .{ .array = builder.toOwnedArray() };
+}
+
+/// Insert a dotted path like "a.b.c" with value into the builder.
+/// Creates nested objects as needed, merging with existing objects.
+fn insertPathEntry(builder: *value.ObjectBuilder, allocator: Allocator, path: []const u8, val: value.Value) errors.Error!void {
+    var iter = std.mem.splitScalar(u8, path, constants.path_separator);
+    const first_segment = iter.next() orelse return;
+
+    // Get remaining path
+    const rest = iter.rest();
+    if (rest.len == 0) {
+        // No more segments, just add the value
+        try builder.put(first_segment, val);
+        return;
+    }
+
+    // Need to create or merge with nested object
+    var nested_builder = value.ObjectBuilder.init(allocator);
+    errdefer nested_builder.deinit();
+
+    // Check if we already have this key
+    var existing_found = false;
+    for (builder.entries.items) |entry| {
+        if (std.mem.eql(u8, entry.key, first_segment)) {
+            existing_found = true;
+            // If it's an object, copy its contents
+            if (entry.value == .object) {
+                for (entry.value.object.entries) |e| {
+                    var cloned = try e.value.clone(allocator);
+                    errdefer cloned.deinit(allocator);
+                    nested_builder.put(e.key, cloned) catch return errors.Error.OutOfMemory;
+                }
+            }
+            break;
+        }
+    }
+
+    // Insert the rest of the path into nested builder
+    try insertPathEntry(&nested_builder, allocator, rest, val);
+
+    const nested_obj = nested_builder.toOwnedObject();
+
+    if (existing_found) {
+        // Remove old entry and add new one
+        // Find and remove the existing entry
+        var i: usize = 0;
+        while (i < builder.entries.items.len) {
+            if (std.mem.eql(u8, builder.entries.items[i].key, first_segment)) {
+                const entry = builder.entries.orderedRemove(i);
+                allocator.free(entry.key);
+                @constCast(&entry.value).deinit(allocator);
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    builder.put(first_segment, .{ .object = nested_obj }) catch return errors.Error.OutOfMemory;
+}
+
+/// Decode TOON with path expansion.
+pub fn decodeWithPathExpansion(allocator: Allocator, input: []const u8) errors.Error!value.Value {
+    var result = try decode(allocator, input);
+    errdefer result.deinit(allocator);
+
+    if (result == .object or result == .array) {
+        const expanded = try expandPaths(allocator, result);
+        result.deinit(allocator);
+        return expanded;
+    }
+
+    return result;
+}
+
+/// Convert TOON to JSON with path expansion.
+pub fn toonToJsonWithPathExpansion(allocator: Allocator, input: []const u8) errors.Error![]u8 {
+    var val = try decodeWithPathExpansion(allocator, input);
+    defer val.deinit(allocator);
+    return valueToJson(allocator, val);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1784,4 +1917,78 @@ test "valueToJson empty object" {
     const result = try valueToJson(allocator, .{ .object = value.Object.init() });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("{}", result);
+}
+
+// ============================================================================
+// Path Expansion Tests
+// ============================================================================
+
+test "expandPaths simple dotted key" {
+    const allocator = std.testing.allocator;
+
+    // Build {"a.b.c": 1}
+    var builder = value.ObjectBuilder.init(allocator);
+    builder.put("a.b.c", .{ .number = 1.0 }) catch unreachable;
+    const obj = builder.toOwnedObject();
+    defer @constCast(&obj).deinit(allocator);
+
+    var expanded = try expandPaths(allocator, .{ .object = obj });
+    defer expanded.deinit(allocator);
+
+    // Should be {"a": {"b": {"c": 1}}}
+    const a = expanded.object.get("a").?.object;
+    const b = a.get("b").?.object;
+    const c = b.get("c");
+    try std.testing.expect(c.?.eql(.{ .number = 1.0 }));
+}
+
+test "expandPaths preserves plain keys" {
+    const allocator = std.testing.allocator;
+
+    var builder = value.ObjectBuilder.init(allocator);
+    builder.put("simple", .{ .number = 42.0 }) catch unreachable;
+    const obj = builder.toOwnedObject();
+    defer @constCast(&obj).deinit(allocator);
+
+    var expanded = try expandPaths(allocator, .{ .object = obj });
+    defer expanded.deinit(allocator);
+
+    try std.testing.expect(expanded.object.get("simple").?.eql(.{ .number = 42.0 }));
+}
+
+test "expandPaths with array" {
+    const allocator = std.testing.allocator;
+
+    // Build [{"a.b": 1}]
+    var inner_builder = value.ObjectBuilder.init(allocator);
+    inner_builder.put("x.y", .{ .number = 1.0 }) catch unreachable;
+
+    var arr_builder = value.ArrayBuilder.init(allocator);
+    arr_builder.append(.{ .object = inner_builder.toOwnedObject() }) catch unreachable;
+    const arr = arr_builder.toOwnedArray();
+    defer @constCast(&arr).deinit(allocator);
+
+    var expanded = try expandPaths(allocator, .{ .array = arr });
+    defer expanded.deinit(allocator);
+
+    const first = expanded.array.get(0).?.object;
+    const x = first.get("x").?.object;
+    try std.testing.expect(x.get("y").?.eql(.{ .number = 1.0 }));
+}
+
+test "decodeWithPathExpansion" {
+    const allocator = std.testing.allocator;
+    var result = try decodeWithPathExpansion(allocator, "a.b.c: 1\n");
+    defer result.deinit(allocator);
+
+    const a = result.object.get("a").?.object;
+    const b = a.get("b").?.object;
+    try std.testing.expect(b.get("c").?.eql(.{ .number = 1.0 }));
+}
+
+test "toonToJsonWithPathExpansion" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJsonWithPathExpansion(allocator, "a.b: 1\n");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("{\"a\":{\"b\":1}}", result);
 }

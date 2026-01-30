@@ -318,6 +318,391 @@ pub fn writeKey(writer: anytype, key: []const u8) !void {
 }
 
 // ============================================================================
+// Container Encoding
+// ============================================================================
+
+/// Full encode options including indent and key folding.
+pub const FullEncodeOptions = struct {
+    indent: u8 = constants.default_indent_size,
+    delimiter: constants.Delimiter = constants.default_delimiter,
+    key_folding: constants.KeyFoldingMode = constants.default_key_folding,
+    flatten_depth: usize = constants.max_flatten_depth,
+};
+
+/// Encode a Value to TOON format.
+/// Caller owns the returned string and must free it.
+pub fn encode(allocator: Allocator, val: value.Value, options: FullEncodeOptions) Allocator.Error![]u8 {
+    var buffer = std.ArrayListUnmanaged(u8){};
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+    encodeToWriter(writer, val, options) catch return Allocator.Error.OutOfMemory;
+    return buffer.toOwnedSlice(allocator);
+}
+
+/// Encode a Value directly to a writer.
+pub fn encodeToWriter(writer: anytype, val: value.Value, options: FullEncodeOptions) !void {
+    switch (val) {
+        .null, .bool, .number, .string => {
+            try writePrimitive(writer, val, .{ .delimiter = options.delimiter });
+            try writer.writeByte(constants.line_terminator);
+        },
+        .array => |arr| {
+            try encodeRootArray(writer, arr, options);
+        },
+        .object => |obj| {
+            try encodeRootObject(writer, obj, options);
+        },
+    }
+}
+
+/// Convert JSON string to TOON string.
+/// Caller owns the returned string and must free it.
+pub fn jsonToToon(allocator: Allocator, json: []const u8) ![]u8 {
+    return jsonToToonWithOptions(allocator, json, .{});
+}
+
+/// Convert JSON string to TOON string with options.
+/// Caller owns the returned string and must free it.
+pub fn jsonToToonWithOptions(allocator: Allocator, json: []const u8, options: FullEncodeOptions) ![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return error.InvalidJson;
+    defer parsed.deinit();
+    var val = try value.fromStdJson(allocator, parsed.value);
+    defer val.deinit(allocator);
+    return encode(allocator, val, options);
+}
+
+// ----------------------------------------------------------------------------
+// Root-level encoding
+// ----------------------------------------------------------------------------
+
+fn encodeRootObject(writer: anytype, obj: value.Object, options: FullEncodeOptions) !void {
+    for (obj.entries) |entry| {
+        try encodeKeyValuePair(writer, entry.key, entry.value, 0, options);
+    }
+}
+
+fn encodeRootArray(writer: anytype, arr: value.Array, options: FullEncodeOptions) !void {
+    try encodeArrayHeader(writer, null, arr, 0, options);
+    try encodeArrayBody(writer, arr, 1, options);
+}
+
+// ----------------------------------------------------------------------------
+// Key-value encoding
+// ----------------------------------------------------------------------------
+
+fn encodeKeyValuePair(writer: anytype, key: []const u8, val: value.Value, depth: usize, options: FullEncodeOptions) !void {
+    // Try key folding if enabled
+    if (options.key_folding == .safe and depth < options.flatten_depth) {
+        if (tryFoldKeyValue(writer, key, val, depth, options)) return;
+    }
+
+    switch (val) {
+        .null, .bool, .number, .string => {
+            try writeIndent(writer, depth, options.indent);
+            try writeKey(writer, key);
+            try writer.writeAll(": ");
+            try writePrimitive(writer, val, .{ .delimiter = options.delimiter });
+            try writer.writeByte(constants.line_terminator);
+        },
+        .array => |arr| {
+            try writeIndent(writer, depth, options.indent);
+            try encodeArrayHeader(writer, key, arr, depth, options);
+            try encodeArrayBody(writer, arr, depth + 1, options);
+        },
+        .object => |obj| {
+            if (obj.count() == 0) {
+                try writeIndent(writer, depth, options.indent);
+                try writeKey(writer, key);
+                try writer.writeAll(":\n");
+            } else {
+                try writeIndent(writer, depth, options.indent);
+                try writeKey(writer, key);
+                try writer.writeAll(":\n");
+                for (obj.entries) |entry| {
+                    try encodeKeyValuePair(writer, entry.key, entry.value, depth + 1, options);
+                }
+            }
+        },
+    }
+}
+
+/// Try to fold a key-value pair where value is a single-key object chain.
+/// Returns true if folding was performed.
+fn tryFoldKeyValue(writer: anytype, key: []const u8, val: value.Value, depth: usize, options: FullEncodeOptions) bool {
+    const obj = switch (val) {
+        .object => |o| o,
+        else => return false,
+    };
+
+    if (obj.count() != 1) return false;
+
+    const entry = obj.entries[0];
+    if (!validation.isValidIdentifierSegment(entry.key)) return false;
+
+    // Build folded key path
+    var folded_key_buf: [512]u8 = undefined;
+    var folded_key_len: usize = 0;
+
+    // Copy first key
+    if (!validation.isValidIdentifierSegment(key)) return false;
+    if (key.len >= folded_key_buf.len) return false;
+    @memcpy(folded_key_buf[0..key.len], key);
+    folded_key_len = key.len;
+
+    // Collect the chain
+    var current_val = entry.value;
+    var current_key = entry.key;
+    var chain_depth: usize = 1;
+
+    while (chain_depth < options.flatten_depth - depth) {
+        if (folded_key_len + 1 + current_key.len >= folded_key_buf.len) break;
+        folded_key_buf[folded_key_len] = constants.path_separator;
+        folded_key_len += 1;
+        @memcpy(folded_key_buf[folded_key_len..][0..current_key.len], current_key);
+        folded_key_len += current_key.len;
+
+        const next_obj = switch (current_val) {
+            .object => |o| o,
+            else => break,
+        };
+
+        if (next_obj.count() != 1) break;
+
+        const next_entry = next_obj.entries[0];
+        if (!validation.isValidIdentifierSegment(next_entry.key)) break;
+
+        current_key = next_entry.key;
+        current_val = next_entry.value;
+        chain_depth += 1;
+    }
+
+    // Now write the folded entry
+    const folded_key = folded_key_buf[0..folded_key_len];
+    writeIndent(writer, depth, options.indent) catch return false;
+    writeKey(writer, folded_key) catch return false;
+
+    switch (current_val) {
+        .null, .bool, .number, .string => {
+            writer.writeAll(": ") catch return false;
+            writePrimitive(writer, current_val, .{ .delimiter = options.delimiter }) catch return false;
+            writer.writeByte(constants.line_terminator) catch return false;
+        },
+        .array => |inner_arr| {
+            encodeArrayHeader(writer, null, inner_arr, depth, options) catch return false;
+            encodeArrayBody(writer, inner_arr, depth + 1, options) catch return false;
+        },
+        .object => |inner_obj| {
+            writer.writeAll(":\n") catch return false;
+            for (inner_obj.entries) |e| {
+                encodeKeyValuePair(writer, e.key, e.value, depth + 1, options) catch return false;
+            }
+        },
+    }
+
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Array encoding
+// ----------------------------------------------------------------------------
+
+fn encodeArrayHeader(writer: anytype, key: ?[]const u8, arr: value.Array, depth: usize, options: FullEncodeOptions) !void {
+    if (key) |k| {
+        try writeKey(writer, k);
+    }
+
+    try writer.writeByte(constants.bracket_open);
+    try writer.print("{d}", .{arr.len()});
+
+    // Add delimiter marker if not comma
+    if (options.delimiter != .comma) {
+        try writer.writeByte(options.delimiter.char());
+    }
+
+    try writer.writeByte(constants.bracket_close);
+
+    // Check for tabular format
+    if (extractTabularHeader(arr)) |header| {
+        try writer.writeByte(constants.brace_open);
+        for (0..header.len()) |i| {
+            if (i > 0) try writer.writeByte(options.delimiter.char());
+            try writer.writeAll(header.getKey(i));
+        }
+        try writer.writeByte(constants.brace_close);
+    }
+
+    try writer.writeByte(constants.colon);
+
+    // Check for inline array
+    if (arr.len() > 0 and isInlineableArray(arr)) {
+        try writer.writeByte(' ');
+        try encodeInlineArrayValues(writer, arr, options);
+    }
+    try writer.writeByte(constants.line_terminator);
+    _ = depth;
+}
+
+fn encodeArrayBody(writer: anytype, arr: value.Array, depth: usize, options: FullEncodeOptions) anyerror!void {
+    if (arr.len() == 0) return;
+
+    // Check if inline was already written
+    if (isInlineableArray(arr)) return;
+
+    // Check for tabular format
+    if (extractTabularHeader(arr)) |header| {
+        for (arr.items) |item| {
+            try encodeTabularRowFromHeader(writer, item.object, header, depth, options);
+        }
+        return;
+    }
+
+    // Expanded form with list items
+    for (arr.items) |item| {
+        try encodeListItem(writer, item, depth, options);
+    }
+}
+
+fn encodeInlineArrayValues(writer: anytype, arr: value.Array, options: FullEncodeOptions) !void {
+    for (arr.items, 0..) |item, i| {
+        if (i > 0) try writer.writeByte(options.delimiter.char());
+        try writePrimitive(writer, item, .{ .delimiter = options.delimiter });
+    }
+}
+
+fn encodeTabularRowFromHeader(writer: anytype, obj: value.Object, header: TabularHeader, depth: usize, options: FullEncodeOptions) !void {
+    try writeIndent(writer, depth, options.indent);
+    for (0..header.len()) |i| {
+        if (i > 0) try writer.writeByte(options.delimiter.char());
+        if (obj.get(header.getKey(i))) |val| {
+            try writePrimitive(writer, val, .{ .delimiter = options.delimiter });
+        }
+    }
+    try writer.writeByte(constants.line_terminator);
+}
+
+fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: FullEncodeOptions) anyerror!void {
+    try writeIndent(writer, depth, options.indent);
+    try writer.writeAll("- ");
+
+    switch (item) {
+        .null, .bool, .number, .string => {
+            try writePrimitive(writer, item, .{ .delimiter = options.delimiter });
+            try writer.writeByte(constants.line_terminator);
+        },
+        .array => |arr| {
+            // Nested array as list item
+            try encodeArrayHeader(writer, null, arr, depth, options);
+            try encodeArrayBody(writer, arr, depth + 1, options);
+        },
+        .object => |obj| {
+            if (obj.count() == 0) {
+                try writer.writeByte(constants.line_terminator);
+            } else {
+                // First key on same line
+                const first = obj.entries[0];
+                try writeKey(writer, first.key);
+                switch (first.value) {
+                    .null, .bool, .number, .string => {
+                        try writer.writeAll(": ");
+                        try writePrimitive(writer, first.value, .{ .delimiter = options.delimiter });
+                        try writer.writeByte(constants.line_terminator);
+                    },
+                    .array => |arr| {
+                        try encodeArrayHeader(writer, null, arr, depth, options);
+                        try encodeArrayBody(writer, arr, depth + 2, options);
+                    },
+                    .object => |inner_obj| {
+                        try writer.writeAll(":\n");
+                        for (inner_obj.entries) |entry| {
+                            try encodeKeyValuePair(writer, entry.key, entry.value, depth + 2, options);
+                        }
+                    },
+                }
+                // Remaining keys at depth + 1
+                for (obj.entries[1..]) |entry| {
+                    try encodeKeyValuePair(writer, entry.key, entry.value, depth + 1, options);
+                }
+            }
+        },
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Type predicates
+// ----------------------------------------------------------------------------
+
+/// Returns true if all items are primitives (suitable for inline encoding).
+fn isArrayOfPrimitives(arr: value.Array) bool {
+    for (arr.items) |item| {
+        if (!item.isPrimitive()) return false;
+    }
+    return true;
+}
+
+/// Returns true if all items are objects with the same keys in the same order.
+fn isArrayOfHomogeneousObjects(arr: value.Array) bool {
+    if (arr.len() < 1) return false;
+    const first = arr.items[0];
+    if (first != .object) return false;
+    const first_obj = first.object;
+    if (first_obj.count() == 0) return false;
+
+    for (arr.items[1..]) |item| {
+        if (item != .object) return false;
+        const obj = item.object;
+        if (obj.count() != first_obj.count()) return false;
+        for (obj.entries, first_obj.entries) |a, b| {
+            if (!std.mem.eql(u8, a.key, b.key)) return false;
+            // Values must be primitives for tabular format
+            if (!a.value.isPrimitive()) return false;
+        }
+    }
+    // Check first object values too
+    for (first_obj.entries) |entry| {
+        if (!entry.value.isPrimitive()) return false;
+    }
+    return true;
+}
+
+/// Returns true if the array can be encoded inline.
+fn isInlineableArray(arr: value.Array) bool {
+    return isArrayOfPrimitives(arr);
+}
+
+/// Extract field names if array is suitable for tabular encoding.
+/// Returns null if not tabular.
+/// Note: Returns a reference into the first object's entries - valid as long as arr is.
+fn extractTabularHeader(arr: value.Array) ?TabularHeader {
+    if (!isArrayOfHomogeneousObjects(arr)) return null;
+    const first_obj = arr.items[0].object;
+    return .{ .entries = first_obj.entries };
+}
+
+const TabularHeader = struct {
+    entries: []const value.Object.Entry,
+
+    fn len(self: TabularHeader) usize {
+        return self.entries.len;
+    }
+
+    fn getKey(self: TabularHeader, index: usize) []const u8 {
+        return self.entries[index].key;
+    }
+};
+
+// ----------------------------------------------------------------------------
+// Utility functions
+// ----------------------------------------------------------------------------
+
+fn writeIndent(writer: anytype, depth: usize, indent_size: u8) @TypeOf(writer).Error!void {
+    const spaces = depth * indent_size;
+    var i: usize = 0;
+    while (i < spaces) : (i += 1) {
+        try writer.writeByte(constants.space);
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -759,4 +1144,249 @@ test "writeKey quoted" {
     stream.reset();
     try writeKey(stream.writer(), "key\twith\ttabs");
     try std.testing.expectEqualStrings("\"key\\twith\\ttabs\"", stream.getWritten());
+}
+
+// ============================================================================
+// Container Encoding Tests
+// ============================================================================
+
+test "encode primitive null" {
+    const allocator = std.testing.allocator;
+    const result = try encode(allocator, .null, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("null\n", result);
+}
+
+test "encode primitive number" {
+    const allocator = std.testing.allocator;
+    const result = try encode(allocator, .{ .number = 42.0 }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("42\n", result);
+}
+
+test "encode primitive string" {
+    const allocator = std.testing.allocator;
+    const result = try encode(allocator, .{ .string = "hello" }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello\n", result);
+}
+
+test "encode empty object" {
+    const allocator = std.testing.allocator;
+    const result = try encode(allocator, .{ .object = value.Object.init() }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "encode simple object" {
+    const allocator = std.testing.allocator;
+
+    var builder = value.ObjectBuilder.init(allocator);
+    const name_str = try allocator.dupe(u8, "Alice");
+    try builder.put("name", .{ .string = name_str });
+    try builder.put("age", .{ .number = 30.0 });
+    var obj = builder.toOwnedObject();
+    defer obj.deinit(allocator);
+
+    const result = try encode(allocator, .{ .object = obj }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("name: Alice\nage: 30\n", result);
+}
+
+test "encode nested object" {
+    const allocator = std.testing.allocator;
+
+    var inner_builder = value.ObjectBuilder.init(allocator);
+    const host_str = try allocator.dupe(u8, "localhost");
+    try inner_builder.put("host", .{ .string = host_str });
+    try inner_builder.put("port", .{ .number = 8080.0 });
+
+    var outer_builder = value.ObjectBuilder.init(allocator);
+    try outer_builder.put("server", .{ .object = inner_builder.toOwnedObject() });
+
+    var obj = outer_builder.toOwnedObject();
+    defer obj.deinit(allocator);
+
+    const result = try encode(allocator, .{ .object = obj }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("server:\n  host: localhost\n  port: 8080\n", result);
+}
+
+test "encode empty array" {
+    const allocator = std.testing.allocator;
+    const result = try encode(allocator, .{ .array = value.Array.init() }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("[0]:\n", result);
+}
+
+test "encode inline primitive array" {
+    const allocator = std.testing.allocator;
+    const items = [_]value.Value{ .{ .number = 1.0 }, .{ .number = 2.0 }, .{ .number = 3.0 } };
+    var arr = try value.Array.fromSlice(allocator, &items);
+    defer arr.deinit(allocator);
+
+    const result = try encode(allocator, .{ .array = arr }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("[3]: 1,2,3\n", result);
+}
+
+test "encode array with objects - list items" {
+    const allocator = std.testing.allocator;
+
+    var item1_builder = value.ObjectBuilder.init(allocator);
+    try item1_builder.put("id", .{ .number = 1.0 });
+    const name1 = try allocator.dupe(u8, "first");
+    try item1_builder.put("name", .{ .string = name1 });
+
+    var item2_builder = value.ObjectBuilder.init(allocator);
+    try item2_builder.put("id", .{ .number = 2.0 });
+    const name2 = try allocator.dupe(u8, "second");
+    try item2_builder.put("name", .{ .string = name2 });
+
+    var arr_builder = value.ArrayBuilder.init(allocator);
+    try arr_builder.append(.{ .object = item1_builder.toOwnedObject() });
+    try arr_builder.append(.{ .object = item2_builder.toOwnedObject() });
+    var arr = arr_builder.toOwnedArray();
+    defer arr.deinit(allocator);
+
+    const result = try encode(allocator, .{ .array = arr }, .{});
+    defer allocator.free(result);
+
+    const expected =
+        \\[2]{id,name}:
+        \\  1,first
+        \\  2,second
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "encode array with pipe delimiter" {
+    const allocator = std.testing.allocator;
+    const items = [_]value.Value{ .{ .number = 1.0 }, .{ .number = 2.0 } };
+    var arr = try value.Array.fromSlice(allocator, &items);
+    defer arr.deinit(allocator);
+
+    const result = try encode(allocator, .{ .array = arr }, .{ .delimiter = .pipe });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("[2|]: 1|2\n", result);
+}
+
+test "encode object with array value" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]value.Value{ .{ .number = 1.0 }, .{ .number = 2.0 } };
+    const arr = try value.Array.fromSlice(allocator, &items);
+
+    var builder = value.ObjectBuilder.init(allocator);
+    try builder.put("numbers", .{ .array = arr });
+    const obj = builder.toOwnedObject();
+    defer @constCast(&obj).deinit(allocator);
+
+    const result = try encode(allocator, .{ .object = obj }, .{});
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("numbers[2]: 1,2\n", result);
+}
+
+test "encode key folding basic" {
+    const allocator = std.testing.allocator;
+
+    var c_builder = value.ObjectBuilder.init(allocator);
+    try c_builder.put("d", .{ .number = 42.0 });
+
+    var b_builder = value.ObjectBuilder.init(allocator);
+    try b_builder.put("c", .{ .object = c_builder.toOwnedObject() });
+
+    var a_builder = value.ObjectBuilder.init(allocator);
+    try a_builder.put("b", .{ .object = b_builder.toOwnedObject() });
+
+    var outer = value.ObjectBuilder.init(allocator);
+    try outer.put("a", .{ .object = a_builder.toOwnedObject() });
+    var obj = outer.toOwnedObject();
+    defer obj.deinit(allocator);
+
+    const result = try encode(allocator, .{ .object = obj }, .{ .key_folding = .safe });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("a.b.c.d: 42\n", result);
+}
+
+test "encode key folding stops at multi-key object" {
+    const allocator = std.testing.allocator;
+
+    var inner_builder = value.ObjectBuilder.init(allocator);
+    try inner_builder.put("x", .{ .number = 1.0 });
+    try inner_builder.put("y", .{ .number = 2.0 });
+
+    var outer_builder = value.ObjectBuilder.init(allocator);
+    try outer_builder.put("point", .{ .object = inner_builder.toOwnedObject() });
+    var obj = outer_builder.toOwnedObject();
+    defer obj.deinit(allocator);
+
+    const result = try encode(allocator, .{ .object = obj }, .{ .key_folding = .safe });
+    defer allocator.free(result);
+
+    const expected =
+        \\point:
+        \\  x: 1
+        \\  y: 2
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "jsonToToon simple object" {
+    const allocator = std.testing.allocator;
+    const result = try jsonToToon(allocator, "{\"name\":\"Alice\",\"age\":30}");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("name: Alice\nage: 30\n", result);
+}
+
+test "jsonToToon array" {
+    const allocator = std.testing.allocator;
+    const result = try jsonToToon(allocator, "[1,2,3]");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("[3]: 1,2,3\n", result);
+}
+
+test "jsonToToon nested" {
+    const allocator = std.testing.allocator;
+    const result = try jsonToToon(allocator, "{\"config\":{\"port\":8080}}");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("config:\n  port: 8080\n", result);
+}
+
+test "isArrayOfPrimitives" {
+    const allocator = std.testing.allocator;
+
+    // All primitives
+    const items1 = [_]value.Value{ .{ .number = 1.0 }, .{ .bool = true }, .null };
+    var arr1 = try value.Array.fromSlice(allocator, &items1);
+    defer arr1.deinit(allocator);
+    try std.testing.expect(isArrayOfPrimitives(arr1));
+
+    // Empty is primitive
+    try std.testing.expect(isArrayOfPrimitives(value.Array.init()));
+}
+
+test "isArrayOfHomogeneousObjects" {
+    const allocator = std.testing.allocator;
+
+    // Build homogeneous array
+    var item1_builder = value.ObjectBuilder.init(allocator);
+    try item1_builder.put("id", .{ .number = 1.0 });
+    const name1 = try allocator.dupe(u8, "a");
+    try item1_builder.put("name", .{ .string = name1 });
+
+    var item2_builder = value.ObjectBuilder.init(allocator);
+    try item2_builder.put("id", .{ .number = 2.0 });
+    const name2 = try allocator.dupe(u8, "b");
+    try item2_builder.put("name", .{ .string = name2 });
+
+    var arr_builder = value.ArrayBuilder.init(allocator);
+    try arr_builder.append(.{ .object = item1_builder.toOwnedObject() });
+    try arr_builder.append(.{ .object = item2_builder.toOwnedObject() });
+    const arr = arr_builder.toOwnedArray();
+    defer @constCast(&arr).deinit(allocator);
+
+    try std.testing.expect(isArrayOfHomogeneousObjects(arr));
 }

@@ -63,11 +63,19 @@ pub const decodeToWriterWithOptions = decoder.decodeToWriterWithOptions;
 pub const toonToJson = decoder.toonToJson;
 pub const toonToJsonWithOptions = decoder.toonToJsonWithOptions;
 pub const valueToJson = decoder.valueToJson;
+pub const expandPaths = decoder.expandPaths;
+pub const decodeWithPathExpansion = decoder.decodeWithPathExpansion;
+pub const toonToJsonWithPathExpansion = decoder.toonToJsonWithPathExpansion;
 
 // Re-export commonly used functions from encoder
 pub const formatNumber = encoder.formatNumber;
 pub const normalizeValue = encoder.normalizeValue;
 pub const isCanonicalNumber = encoder.isCanonicalNumber;
+pub const encode = encoder.encode;
+pub const encodeToWriter = encoder.encodeToWriter;
+pub const jsonToToon = encoder.jsonToToon;
+pub const jsonToToonWithOptions = encoder.jsonToToonWithOptions;
+pub const FullEncodeOptions = encoder.FullEncodeOptions;
 
 test {
     // Run tests from all imported modules
