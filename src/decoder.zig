@@ -674,7 +674,6 @@ pub fn toonToJsonWithOptions(allocator: Allocator, input: []const u8, options: s
 }
 
 /// Write TOON input as JSON to any writer.
-/// Memory-efficient streaming output that avoids building intermediate strings.
 pub fn decodeToWriter(writer: anytype, allocator: Allocator, input: []const u8) errors.Error!void {
     return decodeToWriterWithOptions(writer, allocator, input, .{});
 }
@@ -770,7 +769,6 @@ fn writeValueAsJson(writer: anytype, val: value.Value) @TypeOf(writer).Error!voi
     }
 }
 
-/// Write a JSON-escaped string to the writer.
 fn writeJsonString(writer: anytype, s: []const u8) @TypeOf(writer).Error!void {
     try writer.writeByte('"');
     for (s) |c| {
@@ -781,7 +779,6 @@ fn writeJsonString(writer: anytype, s: []const u8) @TypeOf(writer).Error!void {
             '\r' => try writer.writeAll("\\r"),
             '\t' => try writer.writeAll("\\t"),
             0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => {
-                // Control characters (except \n \r \t) as \uXXXX
                 try writer.writeAll("\\u00");
                 try writer.writeByte(hexDigit(c >> 4));
                 try writer.writeByte(hexDigit(c & 0x0F));
@@ -796,17 +793,12 @@ fn hexDigit(n: u8) u8 {
     return if (n < 10) '0' + n else 'a' + (n - 10);
 }
 
-/// Write a number in JSON-compatible format.
 fn writeJsonNumber(writer: anytype, n: f64) @TypeOf(writer).Error!void {
-    // Handle negative zero
     const num = if (n == 0.0 and std.math.signbit(n)) 0.0 else n;
 
-    // Check if it's an integer
     if (@floor(num) == num and @abs(num) < 9007199254740992.0) {
-        const int_val: i64 = @intFromFloat(num);
-        try writer.print("{d}", .{int_val});
+        try writer.print("{d}", .{@as(i64, @intFromFloat(num))});
     } else {
-        // Use default float formatting which produces shortest representation
         try writer.print("{d}", .{num});
     }
 }
