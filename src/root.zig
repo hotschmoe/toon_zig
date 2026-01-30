@@ -52,8 +52,16 @@ pub const RootForm = parser.RootForm;
 
 // Re-export commonly used types from decoder
 pub const Decoder = decoder.Decoder;
+pub const EventBuilder = decoder.EventBuilder;
 pub const decode = decoder.decode;
 pub const decodeWithOptions = decoder.decodeWithOptions;
+pub const decodeToEvents = decoder.decodeToEvents;
+pub const decodeToEventsWithOptions = decoder.decodeToEventsWithOptions;
+pub const decodeToWriter = decoder.decodeToWriter;
+pub const decodeToWriterWithOptions = decoder.decodeToWriterWithOptions;
+pub const toonToJson = decoder.toonToJson;
+pub const toonToJsonWithOptions = decoder.toonToJsonWithOptions;
+pub const valueToJson = decoder.valueToJson;
 
 test {
     // Run tests from all imported modules

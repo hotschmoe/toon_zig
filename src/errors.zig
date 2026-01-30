@@ -34,6 +34,9 @@ pub const Error = error{
 
     // Memory errors (from allocator operations)
     OutOfMemory,
+
+    // I/O errors (from writer operations)
+    WriteError,
 };
 
 // ============================================================================
@@ -277,7 +280,8 @@ test "error set has expected count" {
         Error.InvalidJson,
         Error.InvalidToon,
         Error.OutOfMemory,
+        Error.WriteError,
     };
 
-    try std.testing.expectEqual(@as(usize, 13), error_list.len);
+    try std.testing.expectEqual(@as(usize, 14), error_list.len);
 }

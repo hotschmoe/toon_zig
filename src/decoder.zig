@@ -658,6 +658,34 @@ pub fn decode(allocator: Allocator, input: []const u8) errors.Error!value.Value 
     return decodeWithOptions(allocator, input, .{});
 }
 
+/// Convert TOON input to JSON string.
+/// This is the primary high-level API for converting TOON to JSON.
+/// Caller owns the returned string and must free it.
+pub fn toonToJson(allocator: Allocator, input: []const u8) errors.Error![]u8 {
+    return toonToJsonWithOptions(allocator, input, .{});
+}
+
+/// Convert TOON input to JSON string with custom options.
+/// Caller owns the returned string and must free it.
+pub fn toonToJsonWithOptions(allocator: Allocator, input: []const u8, options: stream.DecodeOptions) errors.Error![]u8 {
+    var val = try decodeWithOptions(allocator, input, options);
+    defer val.deinit(allocator);
+    return valueToJson(allocator, val);
+}
+
+/// Write TOON input as JSON to any writer.
+/// Memory-efficient streaming output that avoids building intermediate strings.
+pub fn decodeToWriter(writer: anytype, allocator: Allocator, input: []const u8) errors.Error!void {
+    return decodeToWriterWithOptions(writer, allocator, input, .{});
+}
+
+/// Write TOON input as JSON to any writer with custom options.
+pub fn decodeToWriterWithOptions(writer: anytype, allocator: Allocator, input: []const u8, options: stream.DecodeOptions) errors.Error!void {
+    var val = try decodeWithOptions(allocator, input, options);
+    defer val.deinit(allocator);
+    writeValueAsJson(writer, val) catch return errors.Error.WriteError;
+}
+
 /// Decode TOON input to a Value with custom options.
 /// Caller owns the returned value and must call deinit on it.
 pub fn decodeWithOptions(allocator: Allocator, input: []const u8, options: stream.DecodeOptions) errors.Error!value.Value {
@@ -690,6 +718,97 @@ pub fn decodeToEventsWithOptions(allocator: Allocator, input: []const u8, option
     }
 
     return events.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
+}
+
+// ============================================================================
+// JSON Conversion Helpers
+// ============================================================================
+
+/// Convert a Value to a JSON string.
+/// Caller owns the returned string and must free it.
+pub fn valueToJson(allocator: Allocator, val: value.Value) errors.Error![]u8 {
+    var buffer = std.ArrayListUnmanaged(u8){};
+    errdefer buffer.deinit(allocator);
+
+    const writer = buffer.writer(allocator);
+    writeValueAsJson(writer, val) catch return errors.Error.OutOfMemory;
+
+    return buffer.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
+}
+
+/// Write a Value as JSON to any writer.
+fn writeValueAsJson(writer: anytype, val: value.Value) @TypeOf(writer).Error!void {
+    switch (val) {
+        .null => try writer.writeAll("null"),
+        .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+        .number => |n| {
+            if (std.math.isNan(n) or std.math.isInf(n)) {
+                try writer.writeAll("null");
+            } else {
+                try writeJsonNumber(writer, n);
+            }
+        },
+        .string => |s| try writeJsonString(writer, s),
+        .array => |arr| {
+            try writer.writeByte('[');
+            for (arr.items, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writeValueAsJson(writer, item);
+            }
+            try writer.writeByte(']');
+        },
+        .object => |obj| {
+            try writer.writeByte('{');
+            for (obj.entries, 0..) |entry, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writeJsonString(writer, entry.key);
+                try writer.writeByte(':');
+                try writeValueAsJson(writer, entry.value);
+            }
+            try writer.writeByte('}');
+        },
+    }
+}
+
+/// Write a JSON-escaped string to the writer.
+fn writeJsonString(writer: anytype, s: []const u8) @TypeOf(writer).Error!void {
+    try writer.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => {
+                // Control characters (except \n \r \t) as \uXXXX
+                try writer.writeAll("\\u00");
+                try writer.writeByte(hexDigit(c >> 4));
+                try writer.writeByte(hexDigit(c & 0x0F));
+            },
+            else => try writer.writeByte(c),
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn hexDigit(n: u8) u8 {
+    return if (n < 10) '0' + n else 'a' + (n - 10);
+}
+
+/// Write a number in JSON-compatible format.
+fn writeJsonNumber(writer: anytype, n: f64) @TypeOf(writer).Error!void {
+    // Handle negative zero
+    const num = if (n == 0.0 and std.math.signbit(n)) 0.0 else n;
+
+    // Check if it's an integer
+    if (@floor(num) == num and @abs(num) < 9007199254740992.0) {
+        const int_val: i64 = @intFromFloat(num);
+        try writer.print("{d}", .{int_val});
+    } else {
+        // Use default float formatting which produces shortest representation
+        try writer.print("{d}", .{num});
+    }
 }
 
 // ============================================================================
@@ -1391,4 +1510,286 @@ test "EventBuilder iterator interface" {
 
     // Calling next again should return null
     try std.testing.expectEqual(@as(?stream.JsonStreamEvent, null), try builder.next());
+}
+
+// ============================================================================
+// toonToJson Tests
+// ============================================================================
+
+test "toonToJson empty input" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("{}", result);
+}
+
+test "toonToJson single primitive - null" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "null");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("null", result);
+}
+
+test "toonToJson single primitive - boolean" {
+    const allocator = std.testing.allocator;
+
+    const result_true = try toonToJson(allocator, "true");
+    defer allocator.free(result_true);
+    try std.testing.expectEqualStrings("true", result_true);
+
+    const result_false = try toonToJson(allocator, "false");
+    defer allocator.free(result_false);
+    try std.testing.expectEqualStrings("false", result_false);
+}
+
+test "toonToJson single primitive - number" {
+    const allocator = std.testing.allocator;
+
+    const result_int = try toonToJson(allocator, "42");
+    defer allocator.free(result_int);
+    try std.testing.expectEqualStrings("42", result_int);
+
+    const result_float = try toonToJson(allocator, "3.14");
+    defer allocator.free(result_float);
+    try std.testing.expectEqualStrings("3.14", result_float);
+}
+
+test "toonToJson single primitive - string" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "hello");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("\"hello\"", result);
+}
+
+test "toonToJson simple object" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "name: Alice\nage: 30\n");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", result);
+}
+
+test "toonToJson nested object" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\user:
+        \\  name: Bob
+        \\  age: 25
+        \\
+    ;
+    const result = try toonToJson(allocator, input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("{\"user\":{\"name\":\"Bob\",\"age\":25}}", result);
+}
+
+test "toonToJson inline array" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "[3]: 1,2,3\n");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("[1,2,3]", result);
+}
+
+test "toonToJson mixed array" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "[4]: 42,true,null,text\n");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("[42,true,null,\"text\"]", result);
+}
+
+test "toonToJson tabular array" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\[2]{id,name}:
+        \\  1,Alice
+        \\  2,Bob
+        \\
+    ;
+    const result = try toonToJson(allocator, input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}]", result);
+}
+
+test "toonToJson string with escapes" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "text: \"hello\\nworld\"\n");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("{\"text\":\"hello\\nworld\"}", result);
+}
+
+test "toonToJson string with quotes" {
+    const allocator = std.testing.allocator;
+    const result = try toonToJson(allocator, "text: \"say \\\"hi\\\"\"\n");
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("{\"text\":\"say \\\"hi\\\"\"}", result);
+}
+
+test "toonToJson complex nested structure" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\config:
+        \\  name: app
+        \\  settings:
+        \\    debug: true
+        \\    port: 8080
+        \\  tags[2]: dev,test
+        \\
+    ;
+    const result = try toonToJson(allocator, input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings(
+        "{\"config\":{\"name\":\"app\",\"settings\":{\"debug\":true,\"port\":8080},\"tags\":[\"dev\",\"test\"]}}",
+        result,
+    );
+}
+
+test "toonToJson list items with objects" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\items[2]:
+        \\  - id: 1
+        \\    name: first
+        \\  - id: 2
+        \\    name: second
+        \\
+    ;
+    const result = try toonToJson(allocator, input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings(
+        "{\"items\":[{\"id\":1,\"name\":\"first\"},{\"id\":2,\"name\":\"second\"}]}",
+        result,
+    );
+}
+
+// ============================================================================
+// decodeToWriter Tests
+// ============================================================================
+
+test "decodeToWriter simple object" {
+    const allocator = std.testing.allocator;
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(allocator);
+
+    try decodeToWriter(buffer.writer(allocator), allocator, "a: 1\n");
+
+    try std.testing.expectEqualStrings("{\"a\":1}", buffer.items);
+}
+
+test "decodeToWriter nested structure" {
+    const allocator = std.testing.allocator;
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(allocator);
+
+    const input =
+        \\outer:
+        \\  inner: value
+        \\
+    ;
+    try decodeToWriter(buffer.writer(allocator), allocator, input);
+
+    try std.testing.expectEqualStrings("{\"outer\":{\"inner\":\"value\"}}", buffer.items);
+}
+
+test "decodeToWriter with options" {
+    const allocator = std.testing.allocator;
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(allocator);
+
+    // Test that strict mode validation works with writer API
+    try decodeToWriterWithOptions(buffer.writer(allocator), allocator, "x: 1\n", .{ .strict = true });
+
+    try std.testing.expectEqualStrings("{\"x\":1}", buffer.items);
+}
+
+// ============================================================================
+// valueToJson Tests
+// ============================================================================
+
+test "valueToJson null" {
+    const allocator = std.testing.allocator;
+    const result = try valueToJson(allocator, .null);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("null", result);
+}
+
+test "valueToJson bool" {
+    const allocator = std.testing.allocator;
+
+    const true_result = try valueToJson(allocator, .{ .bool = true });
+    defer allocator.free(true_result);
+    try std.testing.expectEqualStrings("true", true_result);
+
+    const false_result = try valueToJson(allocator, .{ .bool = false });
+    defer allocator.free(false_result);
+    try std.testing.expectEqualStrings("false", false_result);
+}
+
+test "valueToJson number integer" {
+    const allocator = std.testing.allocator;
+
+    const result = try valueToJson(allocator, .{ .number = 42 });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("42", result);
+
+    const neg_result = try valueToJson(allocator, .{ .number = -100 });
+    defer allocator.free(neg_result);
+    try std.testing.expectEqualStrings("-100", neg_result);
+}
+
+test "valueToJson number float" {
+    const allocator = std.testing.allocator;
+
+    const result = try valueToJson(allocator, .{ .number = 3.14 });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("3.14", result);
+}
+
+test "valueToJson number special values become null" {
+    const allocator = std.testing.allocator;
+
+    const nan_result = try valueToJson(allocator, .{ .number = std.math.nan(f64) });
+    defer allocator.free(nan_result);
+    try std.testing.expectEqualStrings("null", nan_result);
+
+    const inf_result = try valueToJson(allocator, .{ .number = std.math.inf(f64) });
+    defer allocator.free(inf_result);
+    try std.testing.expectEqualStrings("null", inf_result);
+}
+
+test "valueToJson string with special chars" {
+    const allocator = std.testing.allocator;
+    const str = try allocator.dupe(u8, "hello\nworld\t\"test\"");
+    var val: value.Value = .{ .string = str };
+    defer val.deinit(allocator);
+
+    const result = try valueToJson(allocator, val);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\"hello\\nworld\\t\\\"test\\\"\"", result);
+}
+
+test "valueToJson empty array" {
+    const allocator = std.testing.allocator;
+
+    const result = try valueToJson(allocator, .{ .array = value.Array.init() });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("[]", result);
+}
+
+test "valueToJson empty object" {
+    const allocator = std.testing.allocator;
+
+    const result = try valueToJson(allocator, .{ .object = value.Object.init() });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("{}", result);
 }
