@@ -212,6 +212,7 @@ pub fn parseValue(allocator: Allocator, raw: []const u8) errors.Error!value.Valu
 
 /// Parse a delimiter-separated list of values.
 /// Each value is parsed according to parseValue rules.
+/// Quoted values are preserved as strings (not interpreted as primitives).
 ///
 /// Returns owned slice of Values. Caller must free each value and the slice.
 pub fn parseDelimitedPrimitives(
@@ -223,9 +224,9 @@ pub fn parseDelimitedPrimitives(
         return &.{};
     }
 
-    const tokens = try scanner.parseDelimitedValues(allocator, content, delimiter);
+    const tokens = try scanner.parseDelimitedTokens(allocator, content, delimiter);
     defer {
-        for (tokens) |t| allocator.free(t);
+        for (tokens) |*t| @constCast(t).deinit(allocator);
         allocator.free(tokens);
     }
 
@@ -236,7 +237,7 @@ pub fn parseDelimitedPrimitives(
     }
 
     for (tokens) |token| {
-        const parsed = try parsePrimitiveToken(allocator, token, false);
+        const parsed = try parsePrimitiveToken(allocator, token.value, token.was_quoted);
         values.append(allocator, parsed) catch return errors.Error.OutOfMemory;
     }
 
@@ -682,6 +683,51 @@ test "parseDelimitedPrimitives - empty" {
     defer allocator.free(values);
 
     try std.testing.expectEqual(@as(usize, 0), values.len);
+}
+
+test "parseDelimitedPrimitives - quoted number stays string" {
+    const allocator = std.testing.allocator;
+    const values = try parseDelimitedPrimitives(allocator, "\"123\",456", .comma);
+    defer {
+        for (values) |*v| v.deinit(allocator);
+        allocator.free(values);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), values.len);
+    // "123" should remain a string because it was quoted
+    try std.testing.expect(values[0].eql(.{ .string = "123" }));
+    // 456 should be parsed as a number
+    try std.testing.expect(values[1].eql(.{ .number = 456.0 }));
+}
+
+test "parseDelimitedPrimitives - quoted boolean stays string" {
+    const allocator = std.testing.allocator;
+    const values = try parseDelimitedPrimitives(allocator, "\"true\",false", .comma);
+    defer {
+        for (values) |*v| v.deinit(allocator);
+        allocator.free(values);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), values.len);
+    // "true" should remain a string because it was quoted
+    try std.testing.expect(values[0].eql(.{ .string = "true" }));
+    // false should be parsed as boolean
+    try std.testing.expect(values[1].eql(.{ .bool = false }));
+}
+
+test "parseDelimitedPrimitives - quoted null stays string" {
+    const allocator = std.testing.allocator;
+    const values = try parseDelimitedPrimitives(allocator, "\"null\",null", .comma);
+    defer {
+        for (values) |*v| v.deinit(allocator);
+        allocator.free(values);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), values.len);
+    // "null" should remain a string because it was quoted
+    try std.testing.expect(values[0].eql(.{ .string = "null" }));
+    // null should be parsed as null
+    try std.testing.expect(values[1].eql(.null));
 }
 
 test "parseArrayHeaderLine - simple" {

@@ -16,6 +16,26 @@ const string_utils = @import("shared/string_utils.zig");
 const validation = @import("shared/validation.zig");
 
 // ============================================================================
+// Parsed Value Token
+// ============================================================================
+
+/// A parsed value token from delimited content.
+/// Tracks whether the value was originally quoted (for correct type interpretation).
+pub const ParsedToken = struct {
+    /// The value string (unescaped if quoted).
+    value: []const u8,
+
+    /// Whether the original value was quoted.
+    /// Quoted values should be treated as strings, not interpreted as primitives.
+    was_quoted: bool,
+
+    /// Free allocated memory.
+    pub fn deinit(self: *ParsedToken, allocator: Allocator) void {
+        allocator.free(self.value);
+    }
+};
+
+// ============================================================================
 // Line Types
 // ============================================================================
 
@@ -579,6 +599,55 @@ pub fn parseDelimitedValues(allocator: Allocator, content: []const u8, delimiter
     return values.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
 }
 
+/// Parse delimiter-separated values into a slice of ParsedTokens.
+/// Unlike parseDelimitedValues, this preserves whether each value was quoted.
+pub fn parseDelimitedTokens(
+    allocator: Allocator,
+    content: []const u8,
+    delimiter: constants.Delimiter,
+) errors.Error![]ParsedToken {
+    if (content.len == 0) {
+        return &.{};
+    }
+
+    var tokens: std.ArrayListUnmanaged(ParsedToken) = .empty;
+    errdefer {
+        for (tokens.items) |*t| t.deinit(allocator);
+        tokens.deinit(allocator);
+    }
+
+    const delim_char = delimiter.char();
+    var start: usize = 0;
+    var i: usize = 0;
+
+    while (i <= content.len) {
+        const at_end = i >= content.len;
+        const at_delimiter = !at_end and content[i] == delim_char;
+
+        if (at_end or at_delimiter) {
+            const raw_value = content[start..i];
+            const token = try parseFieldToken(allocator, raw_value);
+            tokens.append(allocator, token) catch return errors.Error.OutOfMemory;
+            start = i + 1;
+            i += 1;
+        } else if (!at_end and content[i] == constants.double_quote) {
+            // Skip quoted value
+            const quote_result = string_utils.findClosingQuote(content[i + 1 ..]);
+            switch (quote_result) {
+                .found => |pos| {
+                    i += pos + 2;
+                },
+                .unterminated => return errors.Error.UnterminatedString,
+                .invalid_escape => return errors.Error.InvalidEscapeSequence,
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    return tokens.toOwnedSlice(allocator) catch errors.Error.OutOfMemory;
+}
+
 /// Parse a single field value (handles quoting and trimming).
 fn parseFieldValue(allocator: Allocator, raw: []const u8) errors.Error![]const u8 {
     const trimmed = std.mem.trim(u8, raw, " ");
@@ -591,6 +660,29 @@ fn parseFieldValue(allocator: Allocator, raw: []const u8) errors.Error![]const u
     }
 
     return allocator.dupe(u8, trimmed) catch errors.Error.OutOfMemory;
+}
+
+/// Parse a single field value into a token with quoting information.
+fn parseFieldToken(allocator: Allocator, raw: []const u8) errors.Error!ParsedToken {
+    const trimmed = std.mem.trim(u8, raw, " ");
+    if (trimmed.len == 0) {
+        return .{
+            .value = allocator.dupe(u8, "") catch return errors.Error.OutOfMemory,
+            .was_quoted = false,
+        };
+    }
+
+    if (trimmed[0] == constants.double_quote) {
+        return .{
+            .value = try string_utils.parseQuotedString(allocator, trimmed),
+            .was_quoted = true,
+        };
+    }
+
+    return .{
+        .value = allocator.dupe(u8, trimmed) catch return errors.Error.OutOfMemory,
+        .was_quoted = false,
+    };
 }
 
 // ============================================================================
@@ -831,6 +923,39 @@ test "parseDelimitedValues - empty" {
     defer allocator.free(values);
 
     try std.testing.expectEqual(@as(usize, 0), values.len);
+}
+
+test "parseDelimitedTokens - tracks quoting" {
+    const allocator = std.testing.allocator;
+
+    const tokens = try parseDelimitedTokens(allocator, "\"123\",456,\"true\"", .comma);
+    defer {
+        for (tokens) |*t| @constCast(t).deinit(allocator);
+        allocator.free(tokens);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+
+    // "123" was quoted
+    try std.testing.expectEqualStrings("123", tokens[0].value);
+    try std.testing.expect(tokens[0].was_quoted);
+
+    // 456 was not quoted
+    try std.testing.expectEqualStrings("456", tokens[1].value);
+    try std.testing.expect(!tokens[1].was_quoted);
+
+    // "true" was quoted
+    try std.testing.expectEqualStrings("true", tokens[2].value);
+    try std.testing.expect(tokens[2].was_quoted);
+}
+
+test "parseDelimitedTokens - empty" {
+    const allocator = std.testing.allocator;
+
+    const tokens = try parseDelimitedTokens(allocator, "", .comma);
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 0), tokens.len);
 }
 
 test "parseCountAndDelimiter - count only" {
