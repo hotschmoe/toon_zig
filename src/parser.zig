@@ -111,12 +111,6 @@ pub fn parseKey(allocator: Allocator, raw: []const u8) errors.Error!ParsedKey {
         };
     }
 
-    // Unquoted key - validate and duplicate
-    if (!validation.isValidUnquotedKey(trimmed)) {
-        // Key doesn't match unquoted pattern - this is still valid input
-        // but should have been quoted. We accept it in lenient mode.
-    }
-
     const duped = allocator.dupe(u8, trimmed) catch return errors.Error.OutOfMemory;
     return .{
         .value = duped,
@@ -229,14 +223,12 @@ pub fn parseDelimitedPrimitives(
         return &.{};
     }
 
-    // First split into string tokens
     const tokens = try scanner.parseDelimitedValues(allocator, content, delimiter);
     defer {
         for (tokens) |t| allocator.free(t);
         allocator.free(tokens);
     }
 
-    // Now parse each token into a value
     var values: std.ArrayListUnmanaged(value.Value) = .empty;
     errdefer {
         for (values.items) |*v| v.deinit(allocator);
@@ -244,20 +236,7 @@ pub fn parseDelimitedPrimitives(
     }
 
     for (tokens) |token| {
-        // Check if token was quoted (has quotes at start/end after trimming)
-        const trimmed = std.mem.trim(u8, token, " ");
-        const is_quoted = trimmed.len >= 2 and
-            trimmed[0] == constants.double_quote and
-            trimmed[trimmed.len - 1] == constants.double_quote;
-
-        var parsed: value.Value = undefined;
-        if (is_quoted) {
-            // Already unquoted by parseDelimitedValues
-            const str = allocator.dupe(u8, token) catch return errors.Error.OutOfMemory;
-            parsed = .{ .string = str };
-        } else {
-            parsed = try parsePrimitiveToken(allocator, token, false);
-        }
+        const parsed = try parsePrimitiveToken(allocator, token, false);
         values.append(allocator, parsed) catch return errors.Error.OutOfMemory;
     }
 
@@ -443,46 +422,17 @@ pub const RootForm = enum {
 
 /// Detect the root form of a TOON document.
 /// Per SPEC.md Section 4.
-///
-/// Rules:
-/// 1. Valid array header -> root array
-/// 2. Single line (not header or key-value) -> single primitive
-/// 3. Otherwise -> root object
-/// 4. Empty document -> empty object {}
 pub fn detectRootForm(first_line: ?scanner.ScannedLine) RootForm {
-    if (first_line == null) {
-        return .empty;
-    }
+    const line = first_line orelse return .empty;
+    if (line.depth != 0) return .object;
 
-    const line = first_line.?;
-
-    // Blank lines at start don't count
-    if (line.line_type == .blank) {
-        return .empty;
-    }
-
-    // Array header at depth 0 -> root array
-    if (line.line_type == .array_header and line.depth == 0) {
-        return .array;
-    }
-
-    // Key-value at depth 0 -> root object
-    if (line.line_type == .key_value and line.depth == 0) {
-        return .object;
-    }
-
-    // List item at depth 0 is unusual but treat as object context
-    if (line.line_type == .list_item and line.depth == 0) {
-        return .object;
-    }
-
-    // Tabular row at depth 0 without preceding header -> primitive
-    if (line.line_type == .tabular_row and line.depth == 0) {
-        return .primitive;
-    }
-
-    // Default to object
-    return .object;
+    return switch (line.line_type) {
+        .blank => .empty,
+        .array_header => .array,
+        .key_value, .list_item => .object,
+        .tabular_row => .primitive,
+        .comment => .object,
+    };
 }
 
 // ============================================================================
