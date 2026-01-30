@@ -346,14 +346,11 @@ pub const ObjectBuilder = struct {
     }
 
     /// Put a key-value pair (clones both).
-    pub fn putClone(self: *Self, key: []const u8, value: Value) Allocator.Error!void {
+    pub fn putClone(self: *Self, key: []const u8, val: Value) Allocator.Error!void {
         const key_copy = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(key_copy);
-        const value_copy = try value.clone(self.allocator);
-        errdefer {
-            var v = value_copy;
-            v.deinit(self.allocator);
-        }
+        var value_copy = try val.clone(self.allocator);
+        errdefer value_copy.deinit(self.allocator);
         try self.entries.append(self.allocator, .{ .key = key_copy, .value = value_copy });
     }
 
