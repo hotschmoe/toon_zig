@@ -362,6 +362,112 @@ pub const ObjectBuilder = struct {
 };
 
 // ============================================================================
+// std.json.Value Conversion
+// ============================================================================
+
+/// Convert std.json.Value to our Value type.
+/// Per SPEC.md Section 2.1: NaN and Infinity encode as null, -0 normalizes to 0.
+pub fn fromStdJson(allocator: Allocator, json_value: std.json.Value) Allocator.Error!Value {
+    return switch (json_value) {
+        .null => .null,
+        .bool => |b| .{ .bool = b },
+        .integer => |i| .{ .number = @floatFromInt(i) },
+        .float => |f| blk: {
+            // Per SPEC.md Section 2.1: NaN and Infinity encode as null
+            if (std.math.isNan(f) or std.math.isInf(f)) {
+                break :blk .null;
+            }
+            // Per SPEC.md Section 2.1: Negative zero normalizes to 0
+            if (f == 0.0 and std.math.signbit(f)) {
+                break :blk .{ .number = 0.0 };
+            }
+            break :blk .{ .number = f };
+        },
+        .string => |s| .{ .string = try allocator.dupe(u8, s) },
+        .array => |arr| blk: {
+            var builder = ArrayBuilder.init(allocator);
+            errdefer builder.deinit();
+
+            for (arr.items) |item| {
+                try builder.append(try fromStdJson(allocator, item));
+            }
+            break :blk .{ .array = builder.toOwnedArray() };
+        },
+        .object => |obj| blk: {
+            var builder = ObjectBuilder.init(allocator);
+            errdefer builder.deinit();
+
+            // std.json.ObjectMap iterates in unspecified order, but we need
+            // to preserve insertion order. Unfortunately, std.json doesn't
+            // guarantee order, so we just iterate as-is.
+            var iter = obj.iterator();
+            while (iter.next()) |entry| {
+                const value = try fromStdJson(allocator, entry.value_ptr.*);
+                errdefer {
+                    var v = value;
+                    v.deinit(allocator);
+                }
+                try builder.put(entry.key_ptr.*, value);
+            }
+            break :blk .{ .object = builder.toOwnedObject() };
+        },
+        .number_string => |s| blk: {
+            // Parse number string to f64
+            const f = std.fmt.parseFloat(f64, s) catch {
+                // If parsing fails, store as string
+                break :blk .{ .string = try allocator.dupe(u8, s) };
+            };
+            // Apply same normalization as float
+            if (std.math.isNan(f) or std.math.isInf(f)) {
+                break :blk .null;
+            }
+            if (f == 0.0 and std.math.signbit(f)) {
+                break :blk .{ .number = 0.0 };
+            }
+            break :blk .{ .number = f };
+        },
+    };
+}
+
+/// Convert our Value type to std.json.Value.
+/// Caller owns the returned value and must call deinit on it.
+pub fn toStdJson(allocator: Allocator, value: Value) Allocator.Error!std.json.Value {
+    return switch (value) {
+        .null => .null,
+        .bool => |b| .{ .bool = b },
+        .number => |n| blk: {
+            // Per SPEC.md Section 2.1: NaN and Infinity encode as null
+            if (std.math.isNan(n) or std.math.isInf(n)) {
+                break :blk .null;
+            }
+            break :blk .{ .float = n };
+        },
+        .string => |s| .{ .string = try allocator.dupe(u8, s) },
+        .array => |arr| blk: {
+            var json_arr = std.json.Array.init(allocator);
+            errdefer json_arr.deinit();
+
+            for (arr.items) |item| {
+                try json_arr.append(try toStdJson(allocator, item));
+            }
+            break :blk .{ .array = json_arr };
+        },
+        .object => |obj| blk: {
+            var json_obj = std.json.ObjectMap.init(allocator);
+            errdefer json_obj.deinit();
+
+            for (obj.entries) |entry| {
+                const key = try allocator.dupe(u8, entry.key);
+                errdefer allocator.free(key);
+                const json_value = try toStdJson(allocator, entry.value);
+                try json_obj.put(key, json_value);
+            }
+            break :blk .{ .object = json_obj };
+        },
+    };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -617,4 +723,273 @@ test "cross-type inequality" {
     try std.testing.expect(!v_null.eql(v_zero));
     try std.testing.expect(!v_false.eql(v_zero));
     try std.testing.expect(!v_zero.eql(v_str));
+}
+
+// ============================================================================
+// std.json.Value Conversion Tests
+// ============================================================================
+
+test "fromStdJson null" {
+    const allocator = std.testing.allocator;
+    var result = try fromStdJson(allocator, .null);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.eql(.null));
+}
+
+test "fromStdJson bool" {
+    const allocator = std.testing.allocator;
+
+    var result_true = try fromStdJson(allocator, .{ .bool = true });
+    defer result_true.deinit(allocator);
+    try std.testing.expect(result_true.eql(.{ .bool = true }));
+
+    var result_false = try fromStdJson(allocator, .{ .bool = false });
+    defer result_false.deinit(allocator);
+    try std.testing.expect(result_false.eql(.{ .bool = false }));
+}
+
+test "fromStdJson integer" {
+    const allocator = std.testing.allocator;
+
+    var result = try fromStdJson(allocator, .{ .integer = 42 });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.eql(.{ .number = 42.0 }));
+
+    var result_neg = try fromStdJson(allocator, .{ .integer = -100 });
+    defer result_neg.deinit(allocator);
+    try std.testing.expect(result_neg.eql(.{ .number = -100.0 }));
+}
+
+test "fromStdJson float" {
+    const allocator = std.testing.allocator;
+
+    var result = try fromStdJson(allocator, .{ .float = 3.14 });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.eql(.{ .number = 3.14 }));
+}
+
+test "fromStdJson float NaN becomes null" {
+    const allocator = std.testing.allocator;
+
+    var result = try fromStdJson(allocator, .{ .float = std.math.nan(f64) });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.eql(.null));
+}
+
+test "fromStdJson float Infinity becomes null" {
+    const allocator = std.testing.allocator;
+
+    var result_pos = try fromStdJson(allocator, .{ .float = std.math.inf(f64) });
+    defer result_pos.deinit(allocator);
+    try std.testing.expect(result_pos.eql(.null));
+
+    var result_neg = try fromStdJson(allocator, .{ .float = -std.math.inf(f64) });
+    defer result_neg.deinit(allocator);
+    try std.testing.expect(result_neg.eql(.null));
+}
+
+test "fromStdJson float negative zero becomes zero" {
+    const allocator = std.testing.allocator;
+
+    var result = try fromStdJson(allocator, .{ .float = -0.0 });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.eql(.{ .number = 0.0 }));
+    // Verify it's actually positive zero
+    try std.testing.expect(!std.math.signbit(result.number));
+}
+
+test "fromStdJson string" {
+    const allocator = std.testing.allocator;
+
+    var result = try fromStdJson(allocator, .{ .string = "hello world" });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.eql(.{ .string = "hello world" }));
+}
+
+test "fromStdJson array" {
+    const allocator = std.testing.allocator;
+
+    var json_arr = std.json.Array.init(allocator);
+    defer json_arr.deinit();
+    try json_arr.append(.{ .integer = 1 });
+    try json_arr.append(.{ .bool = true });
+    try json_arr.append(.{ .string = "test" });
+
+    var result = try fromStdJson(allocator, .{ .array = json_arr });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), result.array.len());
+    try std.testing.expect(result.array.get(0).?.eql(.{ .number = 1.0 }));
+    try std.testing.expect(result.array.get(1).?.eql(.{ .bool = true }));
+    try std.testing.expect(result.array.get(2).?.eql(.{ .string = "test" }));
+}
+
+test "fromStdJson object" {
+    const allocator = std.testing.allocator;
+
+    var json_obj = std.json.ObjectMap.init(allocator);
+    defer json_obj.deinit();
+    try json_obj.put("name", .{ .string = "Alice" });
+    try json_obj.put("age", .{ .integer = 30 });
+
+    var result = try fromStdJson(allocator, .{ .object = json_obj });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.object.count());
+    try std.testing.expect(result.object.get("name").?.eql(.{ .string = "Alice" }));
+    try std.testing.expect(result.object.get("age").?.eql(.{ .number = 30.0 }));
+}
+
+test "fromStdJson nested structure" {
+    const allocator = std.testing.allocator;
+
+    // Build nested JSON: {"data": [1, {"nested": true}]}
+    var inner_obj = std.json.ObjectMap.init(allocator);
+    defer inner_obj.deinit();
+    try inner_obj.put("nested", .{ .bool = true });
+
+    var json_arr = std.json.Array.init(allocator);
+    defer json_arr.deinit();
+    try json_arr.append(.{ .integer = 1 });
+    try json_arr.append(.{ .object = inner_obj });
+
+    var json_obj = std.json.ObjectMap.init(allocator);
+    defer json_obj.deinit();
+    try json_obj.put("data", .{ .array = json_arr });
+
+    var result = try fromStdJson(allocator, .{ .object = json_obj });
+    defer result.deinit(allocator);
+
+    const data_arr = result.object.get("data").?.array;
+    try std.testing.expectEqual(@as(usize, 2), data_arr.len());
+    try std.testing.expect(data_arr.get(0).?.eql(.{ .number = 1.0 }));
+    const nested_obj = data_arr.get(1).?.object;
+    try std.testing.expect(nested_obj.get("nested").?.eql(.{ .bool = true }));
+}
+
+test "toStdJson null" {
+    const allocator = std.testing.allocator;
+    const result = try toStdJson(allocator, .null);
+    try std.testing.expect(result == .null);
+}
+
+test "toStdJson bool" {
+    const allocator = std.testing.allocator;
+
+    const result_true = try toStdJson(allocator, .{ .bool = true });
+    try std.testing.expect(result_true.bool == true);
+
+    const result_false = try toStdJson(allocator, .{ .bool = false });
+    try std.testing.expect(result_false.bool == false);
+}
+
+test "toStdJson number" {
+    const allocator = std.testing.allocator;
+
+    const result = try toStdJson(allocator, .{ .number = 42.5 });
+    try std.testing.expect(result.float == 42.5);
+}
+
+test "toStdJson number NaN becomes null" {
+    const allocator = std.testing.allocator;
+
+    const result = try toStdJson(allocator, .{ .number = std.math.nan(f64) });
+    try std.testing.expect(result == .null);
+}
+
+test "toStdJson number Infinity becomes null" {
+    const allocator = std.testing.allocator;
+
+    const result_pos = try toStdJson(allocator, .{ .number = std.math.inf(f64) });
+    try std.testing.expect(result_pos == .null);
+
+    const result_neg = try toStdJson(allocator, .{ .number = -std.math.inf(f64) });
+    try std.testing.expect(result_neg == .null);
+}
+
+test "toStdJson string" {
+    const allocator = std.testing.allocator;
+
+    const result = try toStdJson(allocator, .{ .string = "hello" });
+    defer allocator.free(result.string);
+    try std.testing.expectEqualStrings("hello", result.string);
+}
+
+test "toStdJson array" {
+    const allocator = std.testing.allocator;
+    const items = [_]Value{ .{ .number = 1 }, .{ .bool = true } };
+    var arr = try Array.fromSlice(allocator, &items);
+    defer arr.deinit(allocator);
+
+    var result = try toStdJson(allocator, .{ .array = arr });
+    defer result.array.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.array.items.len);
+    try std.testing.expect(result.array.items[0].float == 1.0);
+    try std.testing.expect(result.array.items[1].bool == true);
+}
+
+test "toStdJson object" {
+    const allocator = std.testing.allocator;
+    const entries = [_]Object.Entry{
+        .{ .key = "key", .value = .{ .number = 99 } },
+    };
+    var obj = try Object.fromSlice(allocator, &entries);
+    defer obj.deinit(allocator);
+
+    var result = try toStdJson(allocator, .{ .object = obj });
+    defer {
+        var iter = result.object.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        result.object.deinit();
+    }
+
+    try std.testing.expect(result.object.get("key").?.float == 99.0);
+}
+
+test "roundtrip std.json.Value -> Value -> std.json.Value" {
+    const allocator = std.testing.allocator;
+
+    // Build a complex JSON structure
+    var inner_arr = std.json.Array.init(allocator);
+    defer inner_arr.deinit();
+    try inner_arr.append(.{ .integer = 10 });
+    try inner_arr.append(.{ .float = 20.5 });
+
+    var json_obj = std.json.ObjectMap.init(allocator);
+    defer json_obj.deinit();
+    try json_obj.put("str", .{ .string = "value" });
+    try json_obj.put("num", .{ .integer = 42 });
+    try json_obj.put("arr", .{ .array = inner_arr });
+
+    // Convert to our Value
+    var our_value = try fromStdJson(allocator, .{ .object = json_obj });
+    defer our_value.deinit(allocator);
+
+    // Convert back to std.json.Value
+    var back = try toStdJson(allocator, our_value);
+    defer {
+        // Clean up the returned std.json.Value
+        var iter = back.object.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            if (entry.value_ptr.* == .string) {
+                allocator.free(entry.value_ptr.string);
+            } else if (entry.value_ptr.* == .array) {
+                entry.value_ptr.array.deinit();
+            }
+        }
+        back.object.deinit();
+    }
+
+    // Verify structure preserved
+    try std.testing.expectEqualStrings("value", back.object.get("str").?.string);
+    try std.testing.expect(back.object.get("num").?.float == 42.0);
+    const arr = back.object.get("arr").?.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.items.len);
+    try std.testing.expect(arr.items[0].float == 10.0);
+    try std.testing.expect(arr.items[1].float == 20.5);
 }
