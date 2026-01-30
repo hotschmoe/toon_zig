@@ -7,11 +7,17 @@ const std = @import("std");
 
 // Re-export public modules
 pub const constants = @import("constants.zig");
+pub const errors = @import("errors.zig");
 
 // Re-export commonly used types from constants
 pub const Delimiter = constants.Delimiter;
 pub const KeyFoldingMode = constants.KeyFoldingMode;
 pub const ExpandPathsMode = constants.ExpandPathsMode;
+
+// Re-export commonly used types from errors
+pub const Error = errors.Error;
+pub const ErrorContext = errors.ErrorContext;
+pub const Result = errors.Result;
 
 test {
     // Run tests from all imported modules
