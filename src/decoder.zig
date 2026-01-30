@@ -420,6 +420,17 @@ pub const Decoder = struct {
 
         switch (peeked.line_type) {
             .array_header => {
+                // Check if this is a keyed array (part of an object) or a root array
+                if (peeked.array_header) |header| {
+                    if (header.key != null) {
+                        // Keyed array is part of an object structure
+                        var builder = value.ObjectBuilder.init(self.allocator);
+                        errdefer builder.deinit();
+                        try self.decodeObjectEntries(&builder, nested_depth);
+                        return .{ .object = builder.toOwnedObject() };
+                    }
+                }
+                // Keyless array header - decode as array
                 var line = self.consumePeeked().?;
                 const header = line.array_header orelse {
                     line.deinit(self.allocator);
@@ -752,4 +763,159 @@ test "decode mixed content" {
     try std.testing.expect(result.object.get("active").?.eql(.{ .bool = true }));
     try std.testing.expectEqual(@as(usize, 2), result.object.get("tags").?.array.len());
     try std.testing.expect(result.object.get("meta").?.object.get("version").?.eql(.{ .number = 1.0 }));
+}
+
+test "decode empty array" {
+    const allocator = std.testing.allocator;
+    var result = try decode(allocator, "items[0]:\n");
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("items").?.array;
+    try std.testing.expectEqual(@as(usize, 0), arr.len());
+}
+
+test "decode root empty array" {
+    const allocator = std.testing.allocator;
+    var result = try decode(allocator, "[0]:\n");
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), result.array.len());
+}
+
+test "decode array with mixed primitives" {
+    const allocator = std.testing.allocator;
+    var result = try decode(allocator, "mixed[5]: 42,true,false,null,text\n");
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("mixed").?.array;
+    try std.testing.expectEqual(@as(usize, 5), arr.len());
+    try std.testing.expect(arr.get(0).?.eql(.{ .number = 42.0 }));
+    try std.testing.expect(arr.get(1).?.eql(.{ .bool = true }));
+    try std.testing.expect(arr.get(2).?.eql(.{ .bool = false }));
+    try std.testing.expect(arr.get(3).?.eql(.null));
+    try std.testing.expect(arr.get(4).?.eql(.{ .string = "text" }));
+}
+
+test "decode tabular array with pipe delimiter" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\users[2|]{id|name}:
+        \\  1|Alice
+        \\  2|Bob
+        \\
+    ;
+    var result = try decode(allocator, input);
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("users").?.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.len());
+
+    const row0 = arr.get(0).?.object;
+    try std.testing.expect(row0.get("id").?.eql(.{ .number = 1.0 }));
+    try std.testing.expect(row0.get("name").?.eql(.{ .string = "Alice" }));
+}
+
+test "decode nested arrays in objects" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\data:
+        \\  numbers[3]: 1,2,3
+        \\  names[2]: foo,bar
+        \\
+    ;
+    var result = try decode(allocator, input);
+    defer result.deinit(allocator);
+
+    const data = result.object.get("data").?.object;
+    const numbers = data.get("numbers").?.array;
+    try std.testing.expectEqual(@as(usize, 3), numbers.len());
+    try std.testing.expect(numbers.get(0).?.eql(.{ .number = 1.0 }));
+
+    const names = data.get("names").?.array;
+    try std.testing.expectEqual(@as(usize, 2), names.len());
+    try std.testing.expect(names.get(0).?.eql(.{ .string = "foo" }));
+}
+
+test "decode list items with nested arrays" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\items[2]:
+        \\  - id: 1
+        \\    values[2]: a,b
+        \\  - id: 2
+        \\    values[2]: c,d
+        \\
+    ;
+    var result = try decode(allocator, input);
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("items").?.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.len());
+
+    const item0 = arr.get(0).?.object;
+    try std.testing.expect(item0.get("id").?.eql(.{ .number = 1.0 }));
+    const values0 = item0.get("values").?.array;
+    try std.testing.expectEqual(@as(usize, 2), values0.len());
+    try std.testing.expect(values0.get(0).?.eql(.{ .string = "a" }));
+
+    const item1 = arr.get(1).?.object;
+    const values1 = item1.get("values").?.array;
+    try std.testing.expect(values1.get(0).?.eql(.{ .string = "c" }));
+}
+
+test "decode tabular array count mismatch strict" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\users[3]{id,name}:
+        \\  1,Alice
+        \\  2,Bob
+        \\
+    ;
+    const result = decodeWithOptions(allocator, input, .{ .strict = true });
+    try std.testing.expectError(errors.Error.CountMismatch, result);
+}
+
+test "decode expanded array count mismatch strict" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\items[3]:
+        \\  - first
+        \\  - second
+        \\
+    ;
+    const result = decodeWithOptions(allocator, input, .{ .strict = true });
+    try std.testing.expectError(errors.Error.CountMismatch, result);
+}
+
+test "decode root tabular array" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\[2]{x,y}:
+        \\  1,2
+        \\  3,4
+        \\
+    ;
+    var result = try decode(allocator, input);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.array.len());
+
+    const row0 = result.array.get(0).?.object;
+    try std.testing.expect(row0.get("x").?.eql(.{ .number = 1.0 }));
+    try std.testing.expect(row0.get("y").?.eql(.{ .number = 2.0 }));
+
+    const row1 = result.array.get(1).?.object;
+    try std.testing.expect(row1.get("x").?.eql(.{ .number = 3.0 }));
+    try std.testing.expect(row1.get("y").?.eql(.{ .number = 4.0 }));
+}
+
+test "decode array with quoted values containing delimiter" {
+    const allocator = std.testing.allocator;
+    var result = try decode(allocator, "data[2]: \"a,b\",c\n");
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("data").?.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.len());
+    try std.testing.expect(arr.get(0).?.eql(.{ .string = "a,b" }));
+    try std.testing.expect(arr.get(1).?.eql(.{ .string = "c" }));
 }
