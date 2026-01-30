@@ -74,11 +74,6 @@ pub const Decoder = struct {
     // Line Management
     // ========================================================================
 
-    /// Get the next line from the scanner (not peeked line).
-    fn nextLineFromScanner(self: *Self) errors.Error!?scanner.ScannedLine {
-        return try self.scan.next();
-    }
-
     /// Peek at the next line without consuming it.
     /// Returns the peeked line or fetches a new one.
     fn peekLine(self: *Self) errors.Error!?scanner.ScannedLine {
@@ -173,24 +168,19 @@ pub const Decoder = struct {
             return errors.Error.MalformedArrayHeader;
         };
 
-        const result = try self.decodeArrayContent(header, 0, &line);
-        return result;
+        return try self.decodeArrayContent(header, 0, &line);
     }
 
     // ========================================================================
     // Object Decoding
     // ========================================================================
 
-    /// Decode object entries at a given depth into the builder.
     fn decodeObjectEntries(self: *Self, builder: *value.ObjectBuilder, base_depth: usize) errors.Error!void {
         while (true) {
             const peeked = try self.peekNonBlank() orelse break;
 
-            // Stop if we've outdented past our level
-            if (peeked.depth < base_depth) break;
-
-            // Skip lines at deeper indentation (shouldn't happen in well-formed input)
-            if (peeked.depth > base_depth) {
+            if (peeked.depth != base_depth) {
+                if (peeked.depth < base_depth) break;
                 self.discardPeeked();
                 continue;
             }
@@ -204,53 +194,39 @@ pub const Decoder = struct {
                     var line = self.consumePeeked().?;
                     try self.decodeKeyArrayHeader(builder, &line, base_depth);
                 },
-                .list_item => {
-                    // List items at object level indicate a root array, not object
-                    // This shouldn't happen if root form detection is correct
-                    break;
-                },
                 else => break,
             }
         }
     }
 
-    /// Decode a key-value line and add to builder.
-    /// Takes ownership of the line - caller should not use line after this call.
+    /// Decode a key-value line and add to builder. Takes ownership of the line.
     fn decodeKeyValue(self: *Self, builder: *value.ObjectBuilder, line: *scanner.ScannedLine, base_depth: usize) errors.Error!void {
         defer line.deinit(self.allocator);
 
         const key = line.key orelse return errors.Error.MissingColon;
 
         if (line.value) |val| {
-            // Inline value
             var parsed = try parser.parseValue(self.allocator, val);
             errdefer parsed.deinit(self.allocator);
             try builder.put(key, parsed);
-        } else {
-            // Nested content - peek at next line to determine type
-            const next = try self.peekNonBlank() orelse {
-                // Empty nested content -> empty object
-                const empty_obj: value.Value = .{ .object = value.Object.init() };
-                try builder.put(key, empty_obj);
-                return;
-            };
-
-            if (next.depth <= base_depth) {
-                // No nested content at deeper level -> empty object
-                const empty_obj: value.Value = .{ .object = value.Object.init() };
-                try builder.put(key, empty_obj);
-                return;
-            }
-
-            // Decode nested content
-            var nested = try self.decodeNestedValue(base_depth + 1);
-            errdefer nested.deinit(self.allocator);
-            try builder.put(key, nested);
+            return;
         }
+
+        // Nested content - check if there's content at deeper level
+        const next = try self.peekNonBlank();
+        const has_nested = next != null and next.?.depth > base_depth;
+
+        if (!has_nested) {
+            try builder.put(key, .{ .object = value.Object.init() });
+            return;
+        }
+
+        var nested = try self.decodeNestedValue(base_depth + 1);
+        errdefer nested.deinit(self.allocator);
+        try builder.put(key, nested);
     }
 
-    /// Decode an array header at object level and add to builder.
-    /// Takes ownership of the line - caller should not use line after this call.
+    /// Decode an array header at object level. Takes ownership of the line.
     fn decodeKeyArrayHeader(self: *Self, builder: *value.ObjectBuilder, line: *scanner.ScannedLine, base_depth: usize) errors.Error!void {
         const header = line.array_header orelse {
             line.deinit(self.allocator);
@@ -261,16 +237,12 @@ pub const Decoder = struct {
             return errors.Error.MissingColon;
         };
 
-        // Copy the key before decodeArrayContent frees the line
         const key = self.allocator.dupe(u8, key_ref) catch return errors.Error.OutOfMemory;
-        errdefer self.allocator.free(key);
+        defer self.allocator.free(key);
 
         var arr = try self.decodeArrayContent(header, base_depth, line);
         errdefer arr.deinit(self.allocator);
-
-        // put takes ownership of key by duplicating it, so we need to free our copy
         try builder.put(key, arr);
-        self.allocator.free(key);
     }
 
     // ========================================================================
@@ -278,31 +250,25 @@ pub const Decoder = struct {
     // ========================================================================
 
     /// Decode array content based on header format.
-    /// Takes ownership of the line - caller should not use line after this call.
+    /// Takes ownership of the line.
     fn decodeArrayContent(self: *Self, header: scanner.ArrayHeader, base_depth: usize, line: *scanner.ScannedLine) errors.Error!value.Value {
         defer line.deinit(self.allocator);
 
-        // Check for inline values
         if (header.inline_values) |inline_vals| {
             return try self.decodeInlineArray(inline_vals, header.delimiter, header.count);
         }
 
-        // Check for tabular format
         if (header.fields) |fields| {
             return try self.decodeTabularArray(fields, header.delimiter, header.count, base_depth);
         }
 
-        // Expanded list form
         return try self.decodeExpandedArray(header.delimiter, header.count, base_depth);
     }
 
-    /// Decode an inline primitive array.
     fn decodeInlineArray(self: *Self, content: []const u8, delimiter: constants.Delimiter, expected_count: usize) errors.Error!value.Value {
         const values = try parser.parseDelimitedPrimitives(self.allocator, content, delimiter);
 
-        // Validate count in strict mode
         if (self.options.strict and values.len != expected_count) {
-            // Free the values we just allocated before returning error
             for (values) |*v| @constCast(v).deinit(self.allocator);
             self.allocator.free(values);
             return errors.Error.CountMismatch;
@@ -311,7 +277,6 @@ pub const Decoder = struct {
         return .{ .array = value.Array.fromOwnedSlice(values) };
     }
 
-    /// Decode a tabular array with field names.
     fn decodeTabularArray(self: *Self, fields: []const []const u8, delimiter: constants.Delimiter, expected_count: usize, base_depth: usize) errors.Error!value.Value {
         var arr_builder = value.ArrayBuilder.init(self.allocator);
         errdefer arr_builder.deinit();
@@ -319,19 +284,11 @@ pub const Decoder = struct {
         var row_count: usize = 0;
         while (true) {
             const peeked = try self.peekNonBlank() orelse break;
-
-            // Stop if we've outdented
-            if (peeked.depth <= base_depth) break;
-
-            // Must be a tabular row at depth base_depth + 1
-            if (peeked.depth != base_depth + 1) break;
-
-            if (peeked.line_type != .tabular_row) break;
+            if (peeked.depth != base_depth + 1 or peeked.line_type != .tabular_row) break;
 
             var line = self.consumePeeked().?;
             defer line.deinit(self.allocator);
 
-            // Parse the row values
             const row_content = line.value orelse "";
             const row_values = try parser.parseDelimitedPrimitives(self.allocator, row_content, delimiter);
             defer {
@@ -339,12 +296,10 @@ pub const Decoder = struct {
                 self.allocator.free(row_values);
             }
 
-            // Validate field count in strict mode
             if (self.options.strict and row_values.len != fields.len) {
                 return errors.Error.CountMismatch;
             }
 
-            // Build object from fields and values
             var obj_builder = value.ObjectBuilder.init(self.allocator);
             errdefer obj_builder.deinit();
 
@@ -359,7 +314,6 @@ pub const Decoder = struct {
             row_count += 1;
         }
 
-        // Validate count in strict mode
         if (self.options.strict and row_count != expected_count) {
             return errors.Error.CountMismatch;
         }
@@ -367,9 +321,8 @@ pub const Decoder = struct {
         return .{ .array = arr_builder.toOwnedArray() };
     }
 
-    /// Decode an expanded array with list items.
     fn decodeExpandedArray(self: *Self, delimiter: constants.Delimiter, expected_count: usize, base_depth: usize) errors.Error!value.Value {
-        _ = delimiter; // May be used for nested arrays
+        _ = delimiter;
 
         var arr_builder = value.ArrayBuilder.init(self.allocator);
         errdefer arr_builder.deinit();
@@ -378,26 +331,20 @@ pub const Decoder = struct {
         while (true) {
             const peeked = try self.peekNonBlank() orelse break;
 
-            // Stop if we've outdented
-            if (peeked.depth <= base_depth) break;
-
-            // Must be at depth base_depth + 1
             if (peeked.depth != base_depth + 1) {
-                // Skip deeper lines (they belong to previous item)
+                if (peeked.depth <= base_depth) break;
                 self.discardPeeked();
                 continue;
             }
 
             if (peeked.line_type != .list_item) break;
 
-            // consumePeeked returns the line, decodeListItem will consume it
             var item = try self.decodeListItem(base_depth + 1);
             errdefer item.deinit(self.allocator);
             try arr_builder.append(item);
             item_count += 1;
         }
 
-        // Validate count in strict mode
         if (self.options.strict and item_count != expected_count) {
             return errors.Error.CountMismatch;
         }
@@ -405,9 +352,8 @@ pub const Decoder = struct {
         return .{ .array = arr_builder.toOwnedArray() };
     }
 
-    /// Decode a single list item.
-    /// The item_depth is the depth of the "- " marker line.
-    /// Content within the list item is at item_depth + 1 (indented under the hyphen).
+    /// Decode a single list item at item_depth.
+    /// Content within the list item is at item_depth + 1.
     fn decodeListItem(self: *Self, item_depth: usize) errors.Error!value.Value {
         var line = self.consumePeeked() orelse {
             const empty = self.allocator.dupe(u8, "") catch return errors.Error.OutOfMemory;
@@ -415,46 +361,36 @@ pub const Decoder = struct {
         };
         defer line.deinit(self.allocator);
 
-        // Check if it's a list item with key (- key: value)
-        if (line.key) |key| {
-            var obj_builder = value.ObjectBuilder.init(self.allocator);
-            errdefer obj_builder.deinit();
+        const key = line.key orelse {
+            const val = line.value orelse "";
+            return parser.parseValue(self.allocator, val);
+        };
 
-            if (line.value) |val| {
-                // Inline value: - key: value
-                var parsed = try parser.parseValue(self.allocator, val);
-                errdefer parsed.deinit(self.allocator);
-                try obj_builder.put(key, parsed);
-            } else {
-                // Nested content: - key:
-                var nested = try self.decodeNestedValue(item_depth + 1);
-                errdefer nested.deinit(self.allocator);
-                try obj_builder.put(key, nested);
-            }
+        var obj_builder = value.ObjectBuilder.init(self.allocator);
+        errdefer obj_builder.deinit();
 
-            // Continue collecting object entries at content depth (item_depth + 1)
-            // This handles multi-key list items like:
-            //   - id: 1
-            //     name: Alice  <- this is at item_depth + 1
-            try self.decodeObjectEntriesAtDepth(&obj_builder, item_depth + 1);
-
-            return .{ .object = obj_builder.toOwnedObject() };
+        if (line.value) |val| {
+            var parsed = try parser.parseValue(self.allocator, val);
+            errdefer parsed.deinit(self.allocator);
+            try obj_builder.put(key, parsed);
+        } else {
+            var nested = try self.decodeNestedValue(item_depth + 1);
+            errdefer nested.deinit(self.allocator);
+            try obj_builder.put(key, nested);
         }
 
-        // Simple list item: - value
-        const val = line.value orelse "";
-        return parser.parseValue(self.allocator, val);
+        // Collect additional entries for multi-key list items
+        try self.decodeObjectEntriesAtDepth(&obj_builder, item_depth + 1);
+
+        return .{ .object = obj_builder.toOwnedObject() };
     }
 
-    /// Decode additional object entries at a specific depth (for list items with multiple keys).
+    /// Decode additional object entries at a specific depth (for multi-key list items).
     fn decodeObjectEntriesAtDepth(self: *Self, builder: *value.ObjectBuilder, target_depth: usize) errors.Error!void {
         while (true) {
             const peeked = try self.peekNonBlank() orelse break;
-
-            // Stop if we've outdented or are at different depth
             if (peeked.depth != target_depth) break;
 
-            // Only process key-value and array headers
             switch (peeked.line_type) {
                 .key_value => {
                     var line = self.consumePeeked().?;
@@ -473,7 +409,6 @@ pub const Decoder = struct {
     // Nested Value Decoding
     // ========================================================================
 
-    /// Decode a nested value starting at the given depth.
     fn decodeNestedValue(self: *Self, nested_depth: usize) errors.Error!value.Value {
         const peeked = try self.peekNonBlank() orelse {
             return .{ .object = value.Object.init() };
@@ -492,10 +427,7 @@ pub const Decoder = struct {
                 };
                 return try self.decodeArrayContent(header, nested_depth, &line);
             },
-            .list_item => {
-                // Infer array from list items
-                return try self.decodeInferredArray(nested_depth);
-            },
+            .list_item => return try self.decodeInferredArray(nested_depth),
             .key_value => {
                 var builder = value.ObjectBuilder.init(self.allocator);
                 errdefer builder.deinit();
@@ -503,15 +435,11 @@ pub const Decoder = struct {
                 return .{ .object = builder.toOwnedObject() };
             },
             .tabular_row => {
-                // Tabular row at nested level - parse as value
                 var line = self.consumePeeked().?;
                 defer line.deinit(self.allocator);
-                const val = line.value orelse "";
-                return parser.parseValue(self.allocator, val);
+                return parser.parseValue(self.allocator, line.value orelse "");
             },
-            .blank, .comment => {
-                return .{ .object = value.Object.init() };
-            },
+            .blank, .comment => return .{ .object = value.Object.init() },
         }
     }
 
@@ -523,14 +451,13 @@ pub const Decoder = struct {
         while (true) {
             const peeked = try self.peekNonBlank() orelse break;
 
-            if (peeked.depth < base_depth) break;
             if (peeked.depth != base_depth) {
+                if (peeked.depth < base_depth) break;
                 self.discardPeeked();
                 continue;
             }
             if (peeked.line_type != .list_item) break;
 
-            // decodeListItem will consume the peeked line
             var item = try self.decodeListItem(base_depth);
             errdefer item.deinit(self.allocator);
             try arr_builder.append(item);
