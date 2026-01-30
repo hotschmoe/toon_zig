@@ -32,7 +32,6 @@ pub fn escapeString(allocator: Allocator, input: []const u8) Allocator.Error![]u
 
     // Allocate result buffer
     const result = try allocator.alloc(u8, output_len);
-    errdefer allocator.free(result);
 
     // Second pass: write escaped content
     var i: usize = 0;
@@ -95,7 +94,6 @@ pub fn unescapeString(allocator: Allocator, input: []const u8) errors.Error![]u8
 
     // Allocate result buffer
     const result = allocator.alloc(u8, output_len) catch return errors.Error.OutOfMemory;
-    errdefer allocator.free(result);
 
     // Second pass: write unescaped content
     var out_idx: usize = 0;
@@ -171,15 +169,30 @@ pub fn parseQuotedString(allocator: Allocator, input: []const u8) errors.Error![
 /// Wraps a string in quotes and escapes its content.
 /// Returns a newly allocated string including the surrounding quotes.
 pub fn quoteString(allocator: Allocator, input: []const u8) Allocator.Error![]u8 {
-    const escaped = try escapeString(allocator, input);
-    defer allocator.free(escaped);
+    // Calculate escaped content size
+    var escaped_len: usize = 0;
+    for (input) |c| {
+        escaped_len += if (constants.escapeChar(c) != null) 2 else 1;
+    }
 
     // Allocate for quotes + escaped content
-    const result = try allocator.alloc(u8, escaped.len + 2);
+    const result = try allocator.alloc(u8, escaped_len + 2);
     result[0] = constants.double_quote;
-    @memcpy(result[1 .. escaped.len + 1], escaped);
-    result[escaped.len + 1] = constants.double_quote;
 
+    // Write escaped content
+    var i: usize = 1;
+    for (input) |c| {
+        if (constants.escapeChar(c)) |escaped| {
+            result[i] = constants.backslash;
+            result[i + 1] = escaped;
+            i += 2;
+        } else {
+            result[i] = c;
+            i += 1;
+        }
+    }
+
+    result[escaped_len + 1] = constants.double_quote;
     return result;
 }
 
