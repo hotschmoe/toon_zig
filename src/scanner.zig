@@ -14,7 +14,6 @@ const constants = @import("constants.zig");
 const errors = @import("errors.zig");
 const string_utils = @import("shared/string_utils.zig");
 const validation = @import("shared/validation.zig");
-const literal_utils = @import("shared/literal_utils.zig");
 
 // ============================================================================
 // Line Types
@@ -396,9 +395,7 @@ pub const Scanner = struct {
         if (key.len == 0) return null;
 
         if (key[0] == constants.double_quote) {
-            // Quoted key - parse and unescape
-            const parsed = try string_utils.parseQuotedString(self.allocator, key);
-            return parsed;
+            return try string_utils.parseQuotedString(self.allocator, key);
         }
 
         // Unquoted key - duplicate it
@@ -527,17 +524,13 @@ fn parseCountAndDelimiter(content: []const u8) errors.Error!CountDelimiter {
     };
 
     // Parse optional delimiter
-    var delimiter = constants.default_delimiter;
-    if (count_end < content.len) {
-        const delim_char = content[count_end];
-        if (delim_char == '|') {
-            delimiter = .pipe;
-        } else if (delim_char == '\t') {
-            delimiter = .tab;
-        } else {
-            return errors.Error.MalformedArrayHeader;
-        }
-    }
+    const delimiter: constants.Delimiter = if (count_end >= content.len)
+        constants.default_delimiter
+    else switch (content[count_end]) {
+        '|' => .pipe,
+        '\t' => .tab,
+        else => return errors.Error.MalformedArrayHeader,
+    };
 
     return .{ .count = count, .delimiter = delimiter };
 }
@@ -545,8 +538,7 @@ fn parseCountAndDelimiter(content: []const u8) errors.Error!CountDelimiter {
 /// Parse delimiter-separated values into a slice of strings.
 pub fn parseDelimitedValues(allocator: Allocator, content: []const u8, delimiter: constants.Delimiter) errors.Error![]const []const u8 {
     if (content.len == 0) {
-        const result = allocator.alloc([]const u8, 0) catch return errors.Error.OutOfMemory;
-        return result;
+        return &.{};
     }
 
     var values: std.ArrayListUnmanaged([]const u8) = .empty;
