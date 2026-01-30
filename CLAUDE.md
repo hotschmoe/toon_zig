@@ -129,3 +129,67 @@ we love you, Claude! do your best today
 <!-- Add your project's toolchain, architecture, workflows here -->
 <!-- This section will not be touched by haj.sh -->
 
+### Project Overview
+
+**tzu** (TOON Zig) is a spec-first Zig implementation of TOON (Token-Oriented Object Notation).
+
+Reference: [TOON Spec v1.5](https://github.com/toon-format/spec) | [toon_rust](https://github.com/Dicklesworthstone/toon_rust)
+
+### Toolchain
+
+- **Zig**: 0.15.2+ (see build.zig.zon for minimum version)
+- **Build**: `zig build` / `zig build -Doptimize=ReleaseFast`
+- **Test**: `zig build test`
+- **Format**: `zig fmt src/`
+
+### Architecture
+
+```
+src/
+  main.zig      # CLI entry point
+  root.zig      # Library root (public API)
+  encoder.zig   # JSON -> TOON encoder (to be implemented)
+  decoder.zig   # TOON -> JSON decoder (to be implemented)
+  parser.zig    # TOON parser (to be implemented)
+  value.zig     # Value representation (to be implemented)
+```
+
+### Module Design
+
+The library exposes a simple public API through `root.zig`:
+
+```zig
+// Core functions
+pub fn encode(allocator: Allocator, json: []const u8) ![]u8
+pub fn decode(allocator: Allocator, toon: []const u8) ![]u8
+
+// Streaming variants
+pub fn encodeWriter(writer: anytype, json: []const u8) !void
+pub fn decodeWriter(writer: anytype, toon: []const u8) !void
+
+// Options
+pub const EncodeOptions = struct {
+    indent_size: u8 = 2,
+    key_folding: bool = true,
+    delimiter: Delimiter = .comma,
+};
+
+pub const DecodeOptions = struct {
+    strict: bool = true,
+    path_expansion: bool = true,
+};
+```
+
+### CI/CD
+
+- **CI** (all branches except master): Build + test on Linux/macOS/Windows
+- **Release** (master branch + tags): Cross-compile for 5 targets, create GitHub release
+
+### Implementation Priorities
+
+1. Core parser (line-based, indentation-aware)
+2. Decoder (TOON -> JSON)
+3. Encoder (JSON -> TOON)
+4. CLI interface
+5. Optimizations (streaming, key folding, tabular detection)
+

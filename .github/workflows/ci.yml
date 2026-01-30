@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.optimize }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        optimize: [Debug, ReleaseSafe]
+        include:
+          - os: ubuntu-latest
+            optimize: ReleaseFast
+          - os: ubuntu-latest
+            optimize: ReleaseSmall
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build
+        run: zig build -Doptimize=${{ matrix.optimize }}
+
+      - name: Run Tests
+        run: zig build test -Doptimize=${{ matrix.optimize }}
+
+      - name: Run Executable
+        run: zig build run -Doptimize=${{ matrix.optimize }}
+
+  fuzz:
+    name: Fuzz Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Run Fuzz Tests
+        run: |
+          timeout 60 zig build test --fuzz || true
+        continue-on-error: true
+
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Check Formatting
+        run: zig fmt --check src/
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Generate Docs
+        run: zig build-lib src/root.zig -femit-docs -fno-emit-bin || true
+        continue-on-error: true
+
+  package:
+    name: Package Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Validate Package
+        run: |
+          # Create a test project that depends on toon_zig (inside workspace for relative path)
+          mkdir -p test-consumer
+          cd test-consumer
+
+          cat > build.zig.zon << 'EOF'
+          .{
+              .name = .test_consumer,
+              .version = "0.0.0",
+              .fingerprint = 0xe5383c7136a60b55,
+              .dependencies = .{
+                  .toon_zig = .{
+                      .path = "..",
+                  },
+              },
+              .paths = .{
+                  "build.zig",
+                  "build.zig.zon",
+                  "src",
+              },
+          }
+          EOF
+
+          cat > build.zig << 'EOF'
+          const std = @import("std");
+          pub fn build(b: *std.Build) void {
+              const target = b.standardTargetOptions(.{});
+              const optimize = b.standardOptimizeOption(.{});
+              const toon_zig = b.dependency("toon_zig", .{
+                  .target = target,
+                  .optimize = optimize,
+              });
+              const exe = b.addExecutable(.{
+                  .name = "test",
+                  .root_module = b.createModule(.{
+                      .root_source_file = b.path("src/main.zig"),
+                      .target = target,
+                      .optimize = optimize,
+                      .imports = &.{
+                          .{ .name = "toon_zig", .module = toon_zig.module("toon_zig") },
+                      },
+                  }),
+              });
+              b.installArtifact(exe);
+          }
+          EOF
+
+          mkdir -p src
+          cat > src/main.zig << 'EOF'
+          const toon_zig = @import("toon_zig");
+          pub fn main() !void {
+              // Verify package exports are accessible
+              const result = toon_zig.add(2, 3);
+              _ = result;
+          }
+          EOF
+
+          zig build
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [test, format, package]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Version
+        id: version
+        run: |
+          VERSION=$(grep -oP '\.version = "\K[^"]+' build.zig.zon)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if Tag Exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}

@@ -1,2 +1,25 @@
+# Zig build artifacts
 .zig-cache/
 zig-out/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archive (reviewed manually)
+.archive/
+
+# Test artifacts
+*.log
+coverage/
+
+# Release artifacts (handled by CI)
+*.tar.gz
+*.zip
