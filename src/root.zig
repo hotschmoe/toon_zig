@@ -9,6 +9,7 @@ const std = @import("std");
 pub const constants = @import("constants.zig");
 pub const errors = @import("errors.zig");
 pub const literal_utils = @import("shared/literal_utils.zig");
+pub const string_utils = @import("shared/string_utils.zig");
 
 // Re-export commonly used types from constants
 pub const Delimiter = constants.Delimiter;
