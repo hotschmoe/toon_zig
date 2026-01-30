@@ -262,8 +262,8 @@ test "Result type err case" {
     try std.testing.expectEqual(Error.InvalidToon, err_ctx.code);
 }
 
-test "all error types are distinct" {
-    const errors = [_]Error{
+test "error set has expected count" {
+    const error_list = [_]Error{
         Error.UnterminatedString,
         Error.InvalidEscapeSequence,
         Error.MissingColon,
@@ -279,6 +279,5 @@ test "all error types are distinct" {
         Error.OutOfMemory,
     };
 
-    // Verify we have 13 distinct error types
-    try std.testing.expectEqual(@as(usize, 13), errors.len);
+    try std.testing.expectEqual(@as(usize, 13), error_list.len);
 }
