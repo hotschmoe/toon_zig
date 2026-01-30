@@ -569,14 +569,9 @@ pub const EventBuilder = struct {
                 .start => {
                     frame.state = .iterating;
                     switch (val) {
-                        .object => |obj| {
-                            return .{ .start_object = .{ .count = obj.count() } };
-                        },
-                        .array => |arr| {
-                            return .{ .start_array = .{ .count = arr.len() } };
-                        },
+                        .object => |obj| return .{ .start_object = .{ .count = obj.count() } },
+                        .array => |arr| return .{ .start_array = .{ .count = arr.len() } },
                         else => {
-                            // Primitive - emit and mark done
                             frame.state = .done;
                             return try self.emitPrimitive(val);
                         },
@@ -588,11 +583,7 @@ pub const EventBuilder = struct {
                             if (frame.index < obj.entries.len) {
                                 const entry = &obj.entries[frame.index];
                                 frame.index += 1;
-
-                                // Emit key event
                                 const key = self.allocator.dupe(u8, entry.key) catch return errors.Error.OutOfMemory;
-
-                                // Push child value for next iteration
                                 self.event_stack.append(self.allocator, .{
                                     .value_ptr = &entry.value,
                                     .state = .start,
@@ -601,7 +592,6 @@ pub const EventBuilder = struct {
                                     self.allocator.free(key);
                                     return errors.Error.OutOfMemory;
                                 };
-
                                 return .{ .key = key };
                             } else {
                                 frame.state = .done;
@@ -612,24 +602,19 @@ pub const EventBuilder = struct {
                             if (frame.index < arr.items.len) {
                                 const item = &arr.items[frame.index];
                                 frame.index += 1;
-
-                                // Push child value for next iteration
                                 self.event_stack.append(self.allocator, .{
                                     .value_ptr = item,
                                     .state = .start,
                                     .index = 0,
                                 }) catch return errors.Error.OutOfMemory;
-
-                                continue; // Process the pushed frame
+                                continue;
                             } else {
                                 frame.state = .done;
                                 return .end_array;
                             }
                         },
-                        else => {
-                            frame.state = .done;
-                            continue;
-                        },
+                        // Primitives transition directly from .start to .done
+                        .null, .bool, .number, .string => unreachable,
                     }
                 },
                 .done => {
