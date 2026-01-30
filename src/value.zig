@@ -365,94 +365,74 @@ pub const ObjectBuilder = struct {
 // std.json.Value Conversion
 // ============================================================================
 
+/// Normalize a float value per SPEC.md Section 2.1.
+/// Returns null for NaN/Infinity, normalizes -0 to 0.
+fn normalizeFloat(f: f64) Value {
+    if (std.math.isNan(f) or std.math.isInf(f)) return .null;
+    if (f == 0.0 and std.math.signbit(f)) return .{ .number = 0.0 };
+    return .{ .number = f };
+}
+
 /// Convert std.json.Value to our Value type.
 /// Per SPEC.md Section 2.1: NaN and Infinity encode as null, -0 normalizes to 0.
 pub fn fromStdJson(allocator: Allocator, json_value: std.json.Value) Allocator.Error!Value {
-    return switch (json_value) {
-        .null => .null,
-        .bool => |b| .{ .bool = b },
-        .integer => |i| .{ .number = @floatFromInt(i) },
-        .float => |f| blk: {
-            // Per SPEC.md Section 2.1: NaN and Infinity encode as null
-            if (std.math.isNan(f) or std.math.isInf(f)) {
-                break :blk .null;
-            }
-            // Per SPEC.md Section 2.1: Negative zero normalizes to 0
-            if (f == 0.0 and std.math.signbit(f)) {
-                break :blk .{ .number = 0.0 };
-            }
-            break :blk .{ .number = f };
-        },
-        .string => |s| .{ .string = try allocator.dupe(u8, s) },
-        .array => |arr| blk: {
+    switch (json_value) {
+        .null => return .null,
+        .bool => |b| return .{ .bool = b },
+        .integer => |i| return .{ .number = @floatFromInt(i) },
+        .float => |f| return normalizeFloat(f),
+        .string => |s| return .{ .string = try allocator.dupe(u8, s) },
+        .array => |arr| {
             var builder = ArrayBuilder.init(allocator);
             errdefer builder.deinit();
 
             for (arr.items) |item| {
                 try builder.append(try fromStdJson(allocator, item));
             }
-            break :blk .{ .array = builder.toOwnedArray() };
+            return .{ .array = builder.toOwnedArray() };
         },
-        .object => |obj| blk: {
+        .object => |obj| {
             var builder = ObjectBuilder.init(allocator);
             errdefer builder.deinit();
 
-            // std.json.ObjectMap iterates in unspecified order, but we need
-            // to preserve insertion order. Unfortunately, std.json doesn't
-            // guarantee order, so we just iterate as-is.
             var iter = obj.iterator();
             while (iter.next()) |entry| {
-                const value = try fromStdJson(allocator, entry.value_ptr.*);
-                errdefer {
-                    var v = value;
-                    v.deinit(allocator);
-                }
+                var value = try fromStdJson(allocator, entry.value_ptr.*);
+                errdefer value.deinit(allocator);
                 try builder.put(entry.key_ptr.*, value);
             }
-            break :blk .{ .object = builder.toOwnedObject() };
+            return .{ .object = builder.toOwnedObject() };
         },
-        .number_string => |s| blk: {
-            // Parse number string to f64
+        .number_string => |s| {
             const f = std.fmt.parseFloat(f64, s) catch {
-                // If parsing fails, store as string
-                break :blk .{ .string = try allocator.dupe(u8, s) };
+                return .{ .string = try allocator.dupe(u8, s) };
             };
-            // Apply same normalization as float
-            if (std.math.isNan(f) or std.math.isInf(f)) {
-                break :blk .null;
-            }
-            if (f == 0.0 and std.math.signbit(f)) {
-                break :blk .{ .number = 0.0 };
-            }
-            break :blk .{ .number = f };
+            return normalizeFloat(f);
         },
-    };
+    }
 }
 
 /// Convert our Value type to std.json.Value.
 /// Caller owns the returned value and must call deinit on it.
 pub fn toStdJson(allocator: Allocator, value: Value) Allocator.Error!std.json.Value {
-    return switch (value) {
-        .null => .null,
-        .bool => |b| .{ .bool = b },
-        .number => |n| blk: {
-            // Per SPEC.md Section 2.1: NaN and Infinity encode as null
-            if (std.math.isNan(n) or std.math.isInf(n)) {
-                break :blk .null;
-            }
-            break :blk .{ .float = n };
+    switch (value) {
+        .null => return .null,
+        .bool => |b| return .{ .bool = b },
+        .number => |n| {
+            if (std.math.isNan(n) or std.math.isInf(n)) return .null;
+            return .{ .float = n };
         },
-        .string => |s| .{ .string = try allocator.dupe(u8, s) },
-        .array => |arr| blk: {
+        .string => |s| return .{ .string = try allocator.dupe(u8, s) },
+        .array => |arr| {
             var json_arr = std.json.Array.init(allocator);
             errdefer json_arr.deinit();
 
             for (arr.items) |item| {
                 try json_arr.append(try toStdJson(allocator, item));
             }
-            break :blk .{ .array = json_arr };
+            return .{ .array = json_arr };
         },
-        .object => |obj| blk: {
+        .object => |obj| {
             var json_obj = std.json.ObjectMap.init(allocator);
             errdefer json_obj.deinit();
 
@@ -462,9 +442,9 @@ pub fn toStdJson(allocator: Allocator, value: Value) Allocator.Error!std.json.Va
                 const json_value = try toStdJson(allocator, entry.value);
                 try json_obj.put(key, json_value);
             }
-            break :blk .{ .object = json_obj };
+            return .{ .object = json_obj };
         },
-    };
+    }
 }
 
 // ============================================================================
