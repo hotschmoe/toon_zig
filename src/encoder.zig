@@ -227,11 +227,8 @@ pub fn encodePrimitive(allocator: Allocator, val: value.Value, options: EncodeOp
 /// Encodes a number to its canonical TOON representation.
 /// NaN/Infinity becomes "null".
 fn encodeNumber(allocator: Allocator, n: f64) Allocator.Error![]u8 {
-    if (formatNumber(allocator, n)) |maybe_str| {
-        return maybe_str orelse allocator.dupe(u8, constants.null_literal);
-    } else |err| {
-        return err;
-    }
+    const maybe_str = try formatNumber(allocator, n);
+    return maybe_str orelse allocator.dupe(u8, constants.null_literal);
 }
 
 /// Encodes a string value, quoting if necessary.
@@ -288,19 +285,24 @@ fn writeNumber(writer: anytype, n: f64) !void {
     }
 }
 
+/// Writes a quoted string with escape sequences to a writer.
+fn writeQuoted(writer: anytype, s: []const u8) !void {
+    try writer.writeByte(constants.double_quote);
+    for (s) |c| {
+        if (constants.escapeChar(c)) |escaped| {
+            try writer.writeByte(constants.backslash);
+            try writer.writeByte(escaped);
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeByte(constants.double_quote);
+}
+
 /// Writes a string value directly to a writer, quoting if necessary.
 fn writeString(writer: anytype, s: []const u8, delimiter: constants.Delimiter) !void {
     if (validation.valueNeedsQuoting(s, delimiter)) {
-        try writer.writeByte(constants.double_quote);
-        for (s) |c| {
-            if (constants.escapeChar(c)) |escaped| {
-                try writer.writeByte(constants.backslash);
-                try writer.writeByte(escaped);
-            } else {
-                try writer.writeByte(c);
-            }
-        }
-        try writer.writeByte(constants.double_quote);
+        try writeQuoted(writer, s);
     } else {
         try writer.writeAll(s);
     }
@@ -309,16 +311,7 @@ fn writeString(writer: anytype, s: []const u8, delimiter: constants.Delimiter) !
 /// Writes a key directly to a writer, quoting if necessary.
 pub fn writeKey(writer: anytype, key: []const u8) !void {
     if (validation.keyNeedsQuoting(key)) {
-        try writer.writeByte(constants.double_quote);
-        for (key) |c| {
-            if (constants.escapeChar(c)) |escaped| {
-                try writer.writeByte(constants.backslash);
-                try writer.writeByte(escaped);
-            } else {
-                try writer.writeByte(c);
-            }
-        }
-        try writer.writeByte(constants.double_quote);
+        try writeQuoted(writer, key);
     } else {
         try writer.writeAll(key);
     }
