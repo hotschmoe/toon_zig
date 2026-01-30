@@ -429,7 +429,13 @@ pub fn detectRootForm(first_line: ?scanner.ScannedLine) RootForm {
 
     return switch (line.line_type) {
         .blank => .empty,
-        .array_header => .array,
+        .array_header => blk: {
+            // Root array only if no key: `[N]:` not `key[N]:`
+            if (line.array_header) |header| {
+                if (header.key != null) break :blk .object;
+            }
+            break :blk .array;
+        },
         .key_value, .list_item => .object,
         .tabular_row => .primitive,
         .comment => .object,

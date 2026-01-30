@@ -12,6 +12,7 @@ pub const value = @import("value.zig");
 pub const stream = @import("stream.zig");
 pub const scanner = @import("scanner.zig");
 pub const parser = @import("parser.zig");
+pub const decoder = @import("decoder.zig");
 pub const literal_utils = @import("shared/literal_utils.zig");
 pub const string_utils = @import("shared/string_utils.zig");
 pub const validation = @import("shared/validation.zig");
@@ -48,6 +49,11 @@ pub const ArrayHeader = scanner.ArrayHeader;
 pub const ParsedArrayHeader = parser.ParsedArrayHeader;
 pub const ParsedKey = parser.ParsedKey;
 pub const RootForm = parser.RootForm;
+
+// Re-export commonly used types from decoder
+pub const Decoder = decoder.Decoder;
+pub const decode = decoder.decode;
+pub const decodeWithOptions = decoder.decodeWithOptions;
 
 test {
     // Run tests from all imported modules
