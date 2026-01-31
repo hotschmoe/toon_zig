@@ -64,7 +64,19 @@ pub const Decoder = struct {
 
         return switch (root_form) {
             .empty => .{ .object = value.Object.init() },
-            .primitive => try self.decodePrimitive(),
+            .primitive => {
+                const result = try self.decodePrimitive();
+                errdefer @constCast(&result).deinit(self.allocator);
+
+                // In strict mode, check for additional content after root primitive
+                if (self.options.strict) {
+                    const trailing = try self.peekNonBlank();
+                    if (trailing != null and trailing.?.depth == 0) {
+                        return errors.Error.InvalidToon;
+                    }
+                }
+                return result;
+            },
             .array => try self.decodeRootArray(),
             .object => try self.decodeRootObject(),
         };
@@ -507,9 +519,10 @@ pub const Decoder = struct {
                 return .{ .object = builder.toOwnedObject() };
             },
             .tabular_row => {
-                var line = self.consumePeeked().?;
-                defer line.deinit(self.allocator);
-                return parser.parseValue(self.allocator, line.value orelse "");
+                // A tabular_row (line without colon) is only valid in tabular array context.
+                // In nested object context (like after "a:"), it's a syntax error.
+                self.discardPeeked();
+                return errors.Error.MissingColon;
             },
             .blank, .comment => return .{ .object = value.Object.init() },
         }
