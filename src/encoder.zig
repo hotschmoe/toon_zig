@@ -377,7 +377,7 @@ pub fn jsonToToonWithOptions(allocator: Allocator, json: []const u8, options: Fu
 
 fn encodeRootObject(writer: anytype, obj: value.Object, options: FullEncodeOptions) !void {
     for (obj.entries) |entry| {
-        try encodeKeyValuePair(writer, entry.key, entry.value, 0, options);
+        try encodeKeyValuePairWithContext(writer, entry.key, entry.value, 0, obj.entries, obj.entries, "", options);
     }
 }
 
@@ -391,9 +391,29 @@ fn encodeRootArray(writer: anytype, arr: value.Array, options: FullEncodeOptions
 // ----------------------------------------------------------------------------
 
 fn encodeKeyValuePair(writer: anytype, key: []const u8, val: value.Value, depth: usize, options: FullEncodeOptions) !void {
+    return encodeKeyValuePairWithContext(writer, key, val, depth, &.{}, &.{}, "", options);
+}
+
+fn encodeKeyValuePairWithSiblings(writer: anytype, key: []const u8, val: value.Value, depth: usize, siblings: []const value.Object.Entry, options: FullEncodeOptions) !void {
+    return encodeKeyValuePairWithContext(writer, key, val, depth, siblings, &.{}, "", options);
+}
+
+/// Encode a key-value pair with full context for collision detection.
+/// root_entries: entries at the root level for collision checking
+/// path_prefix: the dotted path from root to the current key (e.g., "data" when encoding meta under data)
+fn encodeKeyValuePairWithContext(
+    writer: anytype,
+    key: []const u8,
+    val: value.Value,
+    depth: usize,
+    siblings: []const value.Object.Entry,
+    root_entries: []const value.Object.Entry,
+    path_prefix: []const u8,
+    options: FullEncodeOptions,
+) !void {
     // Try key folding if enabled
     if (options.key_folding == .safe and depth < options.flatten_depth) {
-        if (tryFoldKeyValue(writer, key, val, depth, options)) return;
+        if (tryFoldKeyValue(writer, key, val, depth, siblings, root_entries, path_prefix, options)) return;
     }
 
     switch (val) {
@@ -418,8 +438,25 @@ fn encodeKeyValuePair(writer: anytype, key: []const u8, val: value.Value, depth:
                 try writeIndent(writer, depth, options.indent);
                 try writeKey(writer, key);
                 try writer.writeAll(":\n");
+
+                // Build new path prefix for children
+                var new_prefix_buf: [512]u8 = undefined;
+                const new_prefix = if (path_prefix.len == 0)
+                    key
+                else blk: {
+                    const len = path_prefix.len + 1 + key.len;
+                    if (len <= new_prefix_buf.len) {
+                        @memcpy(new_prefix_buf[0..path_prefix.len], path_prefix);
+                        new_prefix_buf[path_prefix.len] = '.';
+                        @memcpy(new_prefix_buf[path_prefix.len + 1 ..][0..key.len], key);
+                        break :blk new_prefix_buf[0..len];
+                    } else {
+                        break :blk ""; // Too long, disable collision check
+                    }
+                };
+
                 for (obj.entries) |entry| {
-                    try encodeKeyValuePair(writer, entry.key, entry.value, depth + 1, options);
+                    try encodeKeyValuePairWithContext(writer, entry.key, entry.value, depth + 1, obj.entries, root_entries, new_prefix, options);
                 }
             }
         },
@@ -451,20 +488,31 @@ fn buildFoldedKey(key: []const u8, val: value.Value, depth: usize, max_depth: us
     @memcpy(buf[0..key.len], key);
     var key_len = key.len;
 
-    // Walk the chain
-    var current_key = first_entry.key;
-    var current_val = first_entry.value;
+    // Track the current value (what we'll return if we stop here)
+    var final_value = val;
+
+    // Walk the chain - chain_depth counts segments added (1 = just the initial key)
     var chain_depth: usize = 1;
+    var current_obj = obj;
 
     while (chain_depth < max_depth - depth) {
-        if (key_len + 1 + current_key.len >= buf.len) break;
+        const entry = current_obj.entries[0];
+        const next_key = entry.key;
 
+        if (key_len + 1 + next_key.len >= buf.len) break;
+
+        // Add this segment to the key
         buf[key_len] = constants.path_separator;
         key_len += 1;
-        @memcpy(buf[key_len..][0..current_key.len], current_key);
-        key_len += current_key.len;
+        @memcpy(buf[key_len..][0..next_key.len], next_key);
+        key_len += next_key.len;
+        chain_depth += 1;
 
-        const next_obj = switch (current_val) {
+        // Update final_value to the value at this level
+        final_value = entry.value;
+
+        // Check if we can continue folding
+        const next_obj = switch (entry.value) {
             .object => |o| o,
             else => break,
         };
@@ -473,24 +521,72 @@ fn buildFoldedKey(key: []const u8, val: value.Value, depth: usize, max_depth: us
         const next_entry = next_obj.entries[0];
         if (!validation.isValidIdentifierSegment(next_entry.key)) break;
 
-        current_key = next_entry.key;
-        current_val = next_entry.value;
-        chain_depth += 1;
+        current_obj = next_obj;
     }
 
-    return .{ .key_len = key_len, .final_value = current_val };
+    return .{ .key_len = key_len, .final_value = final_value };
 }
 
 /// Write a folded key-value pair. Returns true if folding was performed.
-fn tryFoldKeyValue(writer: anytype, key: []const u8, val: value.Value, depth: usize, options: FullEncodeOptions) bool {
+fn tryFoldKeyValue(
+    writer: anytype,
+    key: []const u8,
+    val: value.Value,
+    depth: usize,
+    siblings: []const value.Object.Entry,
+    root_entries: []const value.Object.Entry,
+    path_prefix: []const u8,
+    options: FullEncodeOptions,
+) bool {
     var buf: [512]u8 = undefined;
     const result = buildFoldedKey(key, val, depth, options.flatten_depth, &buf) orelse return false;
     const folded_key = buf[0..result.key_len];
 
+    // Build the full path for collision detection
+    var full_path_buf: [1024]u8 = undefined;
+    const full_path = if (path_prefix.len == 0)
+        folded_key
+    else blk: {
+        const len = path_prefix.len + 1 + folded_key.len;
+        if (len <= full_path_buf.len) {
+            @memcpy(full_path_buf[0..path_prefix.len], path_prefix);
+            full_path_buf[path_prefix.len] = '.';
+            @memcpy(full_path_buf[path_prefix.len + 1 ..][0..folded_key.len], folded_key);
+            break :blk full_path_buf[0..len];
+        } else {
+            return false; // Too long, skip folding
+        }
+    };
+
+    // Check for root-level collision: if any root entry key equals or starts with the full path
+    for (root_entries) |root_entry| {
+        // Collision: root key equals the full folded path
+        if (std.mem.eql(u8, root_entry.key, full_path)) return false;
+        // Collision: full path is a prefix of root key (would create ambiguity)
+        if (root_entry.key.len > full_path.len and
+            std.mem.startsWith(u8, root_entry.key, full_path) and
+            root_entry.key[full_path.len] == '.')
+        {
+            return false;
+        }
+    }
+
+    // Also check same-level sibling collision
+    for (siblings) |sibling| {
+        if (std.mem.eql(u8, sibling.key, key)) continue;
+        if (std.mem.eql(u8, sibling.key, folded_key)) return false;
+        if (sibling.key.len > folded_key.len and
+            std.mem.startsWith(u8, sibling.key, folded_key) and
+            sibling.key[folded_key.len] == '.')
+        {
+            return false;
+        }
+    }
+
     // Write the folded entry (errors mean we can't fold)
     writeIndent(writer, depth, options.indent) catch return false;
     writeKey(writer, folded_key) catch return false;
-    writeKeyValue(writer, result.final_value, depth + 1, options) catch return false;
+    writeKeyValue(writer, result.final_value, depth + 1, siblings, options) catch return false;
 
     return true;
 }
@@ -575,29 +671,33 @@ fn encodeTabularRowFromHeader(writer: anytype, obj: value.Object, header: Tabula
 
 fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: FullEncodeOptions) anyerror!void {
     try writeIndent(writer, depth, options.indent);
-    try writer.writeAll("- ");
 
     switch (item) {
         .null, .bool, .number, .string => {
+            try writer.writeAll("- ");
             try writePrimitive(writer, item, .{ .delimiter = options.delimiter });
             try writer.writeByte(constants.line_terminator);
         },
         .array => |arr| {
+            try writer.writeAll("- ");
             try encodeArrayHeader(writer, null, arr, depth, options);
             try encodeArrayBody(writer, arr, depth + 1, options);
         },
         .object => |obj| {
             if (obj.count() == 0) {
+                // Empty object: bare hyphen without trailing space
+                try writer.writeByte(constants.list_marker);
                 try writer.writeByte(constants.line_terminator);
                 return;
             }
+            try writer.writeAll("- ");
             // First key on same line as list marker
             const first = obj.entries[0];
             try writeKey(writer, first.key);
-            try writeKeyValue(writer, first.value, depth + 2, options);
+            try writeKeyValue(writer, first.value, depth + 2, obj.entries, options);
             // Remaining keys at depth + 1
             for (obj.entries[1..]) |entry| {
-                try encodeKeyValuePair(writer, entry.key, entry.value, depth + 1, options);
+                try encodeKeyValuePairWithSiblings(writer, entry.key, entry.value, depth + 1, obj.entries, options);
             }
         },
     }
@@ -605,7 +705,7 @@ fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: Ful
 
 /// Write the value portion of a key-value pair (after the key has been written).
 /// Handles primitives, arrays, and nested objects.
-fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, options: FullEncodeOptions) !void {
+fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, siblings: []const value.Object.Entry, options: FullEncodeOptions) !void {
     switch (val) {
         .null, .bool, .number, .string => {
             try writer.writeAll(": ");
@@ -619,8 +719,9 @@ fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, option
         .object => |obj| {
             try writer.writeAll(":\n");
             for (obj.entries) |entry| {
-                try encodeKeyValuePair(writer, entry.key, entry.value, content_depth, options);
+                try encodeKeyValuePairWithSiblings(writer, entry.key, entry.value, content_depth, obj.entries, options);
             }
+            _ = siblings;
         },
     }
 }

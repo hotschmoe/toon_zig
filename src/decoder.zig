@@ -102,12 +102,26 @@ pub const Decoder = struct {
 
     /// Peek at the next non-blank line within an array context.
     /// In strict mode, blank lines within arrays are rejected per SPEC.md Section 7.
-    fn peekNonBlankInArray(self: *Self) errors.Error!?scanner.ScannedLine {
+    /// A blank line is considered "inside" the array if more array content follows at the right depth.
+    fn peekNonBlankInArray(self: *Self, array_content_depth: usize) errors.Error!?scanner.ScannedLine {
+        var blank_lines_seen: usize = 0;
         while (true) {
             const line = try self.peekLine() orelse return null;
-            if (line.line_type != .blank) return line;
-            if (self.options.strict) return errors.Error.BlankLineInArray;
+            if (line.line_type != .blank) {
+                // Found a non-blank line. Was there a blank line before it?
+                if (blank_lines_seen > 0) {
+                    // If this non-blank line is at array content depth, the blank was inside
+                    if (line.depth >= array_content_depth) {
+                        if (self.options.strict) return errors.Error.BlankLineInArray;
+                        // Already consumed the blank lines, return this line
+                    }
+                    // If line is at lower depth, blank lines were at array boundary (allowed)
+                }
+                return line;
+            }
+            // It's a blank line - consume it and continue looking
             self.discardPeeked();
+            blank_lines_seen += 1;
         }
     }
 
@@ -215,23 +229,24 @@ pub const Decoder = struct {
         defer line.deinit(self.allocator);
 
         const key = line.key orelse return errors.Error.MissingColon;
+        const is_literal = line.key_was_quoted;
 
         if (line.value) |val| {
             var parsed = try parser.parseValue(self.allocator, val);
             errdefer parsed.deinit(self.allocator);
-            try builder.put(key, parsed);
+            try builder.putWithLiteral(key, parsed, is_literal);
             return;
         }
 
         const next = try self.peekNonBlank();
         if (next == null or next.?.depth <= base_depth) {
-            try builder.put(key, .{ .object = value.Object.init() });
+            try builder.putWithLiteral(key, .{ .object = value.Object.init() }, is_literal);
             return;
         }
 
         var nested = try self.decodeNestedValue(base_depth + 1);
         errdefer nested.deinit(self.allocator);
-        try builder.put(key, nested);
+        try builder.putWithLiteral(key, nested, is_literal);
     }
 
     /// Decode an array header at object level. Takes ownership of the line.
@@ -244,13 +259,14 @@ pub const Decoder = struct {
             line.deinit(self.allocator);
             return errors.Error.MissingColon;
         };
+        const is_literal = line.key_was_quoted;
 
         const key = self.allocator.dupe(u8, key_ref) catch return errors.Error.OutOfMemory;
         defer self.allocator.free(key);
 
         var arr = try self.decodeArrayContent(header, base_depth, line);
         errdefer arr.deinit(self.allocator);
-        try builder.put(key, arr);
+        try builder.putWithLiteral(key, arr, is_literal);
     }
 
     // ========================================================================
@@ -289,10 +305,11 @@ pub const Decoder = struct {
         var arr_builder = value.ArrayBuilder.init(self.allocator);
         errdefer arr_builder.deinit();
 
+        const array_content_depth = base_depth + 1;
         var row_count: usize = 0;
         while (true) {
-            const peeked = try self.peekNonBlankInArray() orelse break;
-            if (peeked.depth != base_depth + 1 or peeked.line_type != .tabular_row) break;
+            const peeked = try self.peekNonBlankInArray(array_content_depth) orelse break;
+            if (peeked.depth != array_content_depth or peeked.line_type != .tabular_row) break;
 
             var line = self.consumePeeked().?;
             defer line.deinit(self.allocator);
@@ -335,11 +352,12 @@ pub const Decoder = struct {
         var arr_builder = value.ArrayBuilder.init(self.allocator);
         errdefer arr_builder.deinit();
 
+        const array_content_depth = base_depth + 1;
         var item_count: usize = 0;
         while (true) {
-            const peeked = try self.peekNonBlankInArray() orelse break;
+            const peeked = try self.peekNonBlankInArray(array_content_depth) orelse break;
 
-            if (peeked.depth != base_depth + 1) {
+            if (peeked.depth != array_content_depth) {
                 if (peeked.depth <= base_depth) break;
                 self.discardPeeked();
                 continue;
@@ -367,7 +385,42 @@ pub const Decoder = struct {
             const empty = self.allocator.dupe(u8, "") catch return errors.Error.OutOfMemory;
             return .{ .string = empty };
         };
+
+        // Handle list item with array header (e.g., "- [2]: a,b" or "- key[2]: a,b")
+        if (line.array_header) |header| {
+            if (header.key) |key| {
+                // List item with keyed array: "- users[2]{...}:"
+                // The content (tabular rows) is at item_depth + 2 because:
+                // - item_depth is where the "- " is
+                // - item_depth + 1 is where sibling keys go
+                // - item_depth + 2 is where the array content goes
+                // Copy the key before decodeArrayContent frees the line
+                const key_copy = self.allocator.dupe(u8, key) catch return errors.Error.OutOfMemory;
+                defer self.allocator.free(key_copy);
+
+                var arr = try self.decodeArrayContent(header, item_depth + 1, &line);
+                errdefer arr.deinit(self.allocator);
+
+                var obj_builder = value.ObjectBuilder.init(self.allocator);
+                errdefer obj_builder.deinit();
+                try obj_builder.put(key_copy, arr);
+
+                // Collect additional entries at depth + 1
+                try self.decodeObjectEntriesAtDepth(&obj_builder, item_depth + 1);
+
+                return .{ .object = obj_builder.toOwnedObject() };
+            } else {
+                // List item is an array: "- [2]: a,b"
+                return try self.decodeArrayContent(header, item_depth, &line);
+            }
+        }
+
         defer line.deinit(self.allocator);
+
+        // Handle bare hyphen (empty object) - both key and value are null
+        if (line.key == null and line.value == null) {
+            return .{ .object = value.Object.init() };
+        }
 
         const key = line.key orelse {
             const val = line.value orelse "";
@@ -382,12 +435,15 @@ pub const Decoder = struct {
             errdefer parsed.deinit(self.allocator);
             try obj_builder.put(key, parsed);
         } else {
-            var nested = try self.decodeNestedValue(item_depth + 1);
+            // For "- key:" with no value, the nested content is at item_depth + 2
+            // because: hyphen at item_depth, first key on same line,
+            // nested content indented under that key (not under the hyphen)
+            var nested = try self.decodeNestedValue(item_depth + 2);
             errdefer nested.deinit(self.allocator);
             try obj_builder.put(key, nested);
         }
 
-        // Collect additional entries for multi-key list items
+        // Collect additional entries for multi-key list items at item_depth + 1
         try self.decodeObjectEntriesAtDepth(&obj_builder, item_depth + 1);
 
         return .{ .object = obj_builder.toOwnedObject() };
@@ -465,7 +521,7 @@ pub const Decoder = struct {
         errdefer arr_builder.deinit();
 
         while (true) {
-            const peeked = try self.peekNonBlankInArray() orelse break;
+            const peeked = try self.peekNonBlankInArray(base_depth) orelse break;
 
             if (peeked.depth != base_depth) {
                 if (peeked.depth < base_depth) break;
@@ -690,7 +746,16 @@ pub fn decodeToWriterWithOptions(writer: anytype, allocator: Allocator, input: [
 pub fn decodeWithOptions(allocator: Allocator, input: []const u8, options: stream.DecodeOptions) errors.Error!value.Value {
     var decoder = Decoder.init(allocator, input, options);
     defer decoder.deinit();
-    return try decoder.decode();
+    var result = try decoder.decode();
+
+    // Apply path expansion if enabled
+    if (options.expand_paths == .safe) {
+        const expanded = try expandPathsWithOptions(allocator, result, options.strict);
+        result.deinit(allocator);
+        return expanded;
+    }
+
+    return result;
 }
 
 /// Decode TOON input to a stream of events.
@@ -813,30 +878,60 @@ const validation = @import("shared/validation.zig");
 /// For example, `{"a.b.c": 1}` becomes `{"a": {"b": {"c": 1}}}`.
 /// Only expands keys that are valid foldable paths.
 pub fn expandPaths(allocator: Allocator, val: value.Value) errors.Error!value.Value {
+    return expandPathsWithOptions(allocator, val, false);
+}
+
+/// Expand dotted keys with strict mode option.
+/// In strict mode, conflicts (e.g., "a.b: 1" and "a: 2") cause an error.
+/// In lenient mode, Last-Write-Wins (document order) is applied.
+fn expandPathsWithOptions(allocator: Allocator, val: value.Value, strict: bool) errors.Error!value.Value {
     return switch (val) {
-        .object => |obj| expandObjectPaths(allocator, obj),
-        .array => |arr| expandArrayPaths(allocator, arr),
+        .object => |obj| expandObjectPathsWithOptions(allocator, obj, strict),
+        .array => |arr| expandArrayPathsWithOptions(allocator, arr, strict),
         else => val.clone(allocator) catch return errors.Error.OutOfMemory,
     };
 }
 
-fn expandObjectPaths(allocator: Allocator, obj: value.Object) errors.Error!value.Value {
+fn expandObjectPathsWithOptions(allocator: Allocator, obj: value.Object, strict: bool) errors.Error!value.Value {
     var builder = value.ObjectBuilder.init(allocator);
     errdefer builder.deinit();
 
     for (obj.entries) |entry| {
         // Recursively expand nested values first
-        var expanded_value = try expandPaths(allocator, entry.value);
+        var expanded_value = try expandPathsWithOptions(allocator, entry.value, strict);
         errdefer expanded_value.deinit(allocator);
 
-        // Check if key is a valid foldable path with dots
-        if (std.mem.indexOfScalar(u8, entry.key, constants.path_separator) != null and
-            validation.isValidFoldablePath(entry.key))
-        {
+        // Check if key should be expanded:
+        // - Not a literal key (was quoted)
+        // - Contains dots
+        // - Is a valid foldable path
+        const should_expand = !entry.is_literal and
+            std.mem.indexOfScalar(u8, entry.key, constants.path_separator) != null and
+            validation.isValidFoldablePath(entry.key);
+
+        if (should_expand) {
             // Split and insert nested
-            try insertPathEntry(&builder, allocator, entry.key, expanded_value);
+            try insertPathEntryWithOptions(&builder, allocator, entry.key, expanded_value, strict);
         } else {
-            // Plain key, just add it
+            // Plain key or literal key - check for conflicts and handle LWW
+            const existing_idx = findEntryIndex(&builder, entry.key);
+            if (existing_idx) |idx| {
+                const existing = builder.entries.items[idx].value;
+                if (strict) {
+                    // Conflict: trying to overwrite an expanded object with a primitive/array
+                    if (existing == .object and expanded_value != .object) {
+                        return errors.Error.PathExpansionConflict;
+                    }
+                    // Conflict: trying to overwrite with a different type
+                    if (existing != .object and expanded_value == .object) {
+                        return errors.Error.PathExpansionConflict;
+                    }
+                }
+                // LWW: Remove old entry to replace with new one
+                var removed_entry = builder.entries.orderedRemove(idx);
+                allocator.free(removed_entry.key);
+                @constCast(&removed_entry.value).deinit(allocator);
+            }
             try builder.put(entry.key, expanded_value);
         }
     }
@@ -844,12 +939,12 @@ fn expandObjectPaths(allocator: Allocator, obj: value.Object) errors.Error!value
     return .{ .object = builder.toOwnedObject() };
 }
 
-fn expandArrayPaths(allocator: Allocator, arr: value.Array) errors.Error!value.Value {
+fn expandArrayPathsWithOptions(allocator: Allocator, arr: value.Array, strict: bool) errors.Error!value.Value {
     var builder = value.ArrayBuilder.init(allocator);
     errdefer builder.deinit();
 
     for (arr.items) |item| {
-        var expanded = try expandPaths(allocator, item);
+        var expanded = try expandPathsWithOptions(allocator, item, strict);
         errdefer expanded.deinit(allocator);
         try builder.append(expanded);
     }
@@ -859,12 +954,23 @@ fn expandArrayPaths(allocator: Allocator, arr: value.Array) errors.Error!value.V
 
 /// Insert a dotted path like "a.b.c" with value into the builder.
 /// Creates nested objects as needed, merging with existing objects.
-fn insertPathEntry(builder: *value.ObjectBuilder, allocator: Allocator, path: []const u8, val: value.Value) errors.Error!void {
+fn insertPathEntryWithOptions(builder: *value.ObjectBuilder, allocator: Allocator, path: []const u8, val: value.Value, strict: bool) errors.Error!void {
     var iter = std.mem.splitScalar(u8, path, constants.path_separator);
     const first_segment = iter.next() orelse return;
 
     const rest = iter.rest();
     if (rest.len == 0) {
+        // Final segment - check for conflicts in strict mode
+        if (strict) {
+            const existing_idx = findEntryIndex(builder, first_segment);
+            if (existing_idx) |idx| {
+                const existing = builder.entries.items[idx].value;
+                // Conflict: trying to overwrite something that was expanded
+                if (existing == .object and val != .object) {
+                    return errors.Error.PathExpansionConflict;
+                }
+            }
+        }
         try builder.put(first_segment, val);
         return;
     }
@@ -884,10 +990,14 @@ fn insertPathEntry(builder: *value.ObjectBuilder, allocator: Allocator, path: []
                 errdefer cloned.deinit(allocator);
                 nested_builder.put(e.key, cloned) catch return errors.Error.OutOfMemory;
             }
+        } else if (strict) {
+            // Conflict: trying to expand into something that's not an object
+            return errors.Error.PathExpansionConflict;
         }
+        // In lenient mode, we overwrite the non-object with our expansion
     }
 
-    try insertPathEntry(&nested_builder, allocator, rest, val);
+    try insertPathEntryWithOptions(&nested_builder, allocator, rest, val, strict);
     const nested_obj = nested_builder.toOwnedObject();
 
     // Remove old entry if it existed
@@ -1293,6 +1403,56 @@ test "decode list items with nested arrays" {
     const item1 = arr.get(1).?.object;
     const values1 = item1.get("values").?.array;
     try std.testing.expect(values1.get(0).?.eql(.{ .string = "c" }));
+}
+
+test "decode nested arrays of primitives" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\pairs[2]:
+        \\  - [2]: a,b
+        \\  - [2]: c,d
+        \\
+    ;
+    var result = try decode(allocator, input);
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("pairs").?.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.len());
+
+    const pair0 = arr.get(0).?.array;
+    try std.testing.expectEqual(@as(usize, 2), pair0.len());
+    try std.testing.expect(pair0.get(0).?.eql(.{ .string = "a" }));
+    try std.testing.expect(pair0.get(1).?.eql(.{ .string = "b" }));
+
+    const pair1 = arr.get(1).?.array;
+    try std.testing.expectEqual(@as(usize, 2), pair1.len());
+    try std.testing.expect(pair1.get(0).?.eql(.{ .string = "c" }));
+    try std.testing.expect(pair1.get(1).?.eql(.{ .string = "d" }));
+}
+
+test "decode deeply nested objects in list items" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\items[2]:
+        \\  - properties:
+        \\      state:
+        \\        type: string
+        \\  - id: 2
+        \\
+    ;
+    var result = try decode(allocator, input);
+    defer result.deinit(allocator);
+
+    const arr = result.object.get("items").?.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.len());
+
+    const item0 = arr.get(0).?.object;
+    const properties = item0.get("properties").?.object;
+    const state = properties.get("state").?.object;
+    try std.testing.expect(state.get("type").?.eql(.{ .string = "string" }));
+
+    const item1 = arr.get(1).?.object;
+    try std.testing.expect(item1.get("id").?.eql(.{ .number = 2.0 }));
 }
 
 test "decode tabular array count mismatch strict" {
@@ -1983,4 +2143,32 @@ test "toonToJsonWithPathExpansion" {
     const result = try toonToJsonWithPathExpansion(allocator, "a.b: 1\n");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("{\"a\":{\"b\":1}}", result);
+}
+
+test "path expansion LWW - primitive overwrites expanded object" {
+    const allocator = std.testing.allocator;
+    // a.b: 1 expands to {a: {b: 1}}, then a: 2 should overwrite to {a: 2}
+    var result = try decodeWithOptions(allocator, "a.b: 1\na: 2", .{
+        .expand_paths = .safe,
+        .strict = false,
+    });
+    defer result.deinit(allocator);
+
+    const json = try valueToJson(allocator, result);
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings("{\"a\":2}", json);
+}
+
+test "path expansion LWW - expanded object overwrites primitive" {
+    const allocator = std.testing.allocator;
+    // a: 1, then a.b: 2 should expand to {a: {b: 2}}
+    var result = try decodeWithOptions(allocator, "a: 1\na.b: 2", .{
+        .expand_paths = .safe,
+        .strict = false,
+    });
+    defer result.deinit(allocator);
+
+    const json = try valueToJson(allocator, result);
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings("{\"a\":{\"b\":2}}", json);
 }

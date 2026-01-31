@@ -102,14 +102,23 @@ fn isSafeUnquotedCore(s: []const u8, delim_char: ?u8) bool {
     if (s[0] == constants.list_marker) return false;
     if (s[0] == constants.space or s[s.len - 1] == constants.space) return false;
 
+    // Check for structural characters that would be ambiguous
+    // Brackets and braces at the start look like array headers or field lists
+    if (s[0] == constants.bracket_open or s[0] == constants.brace_open) return false;
+
     for (s) |c| {
         if (delim_char) |dc| {
             if (c == dc) return false;
         } else {
+            // When checking all delimiters, also check tab
             if (c == ',' or c == '|' or c == '\t') return false;
         }
         if (c == constants.double_quote or c == constants.backslash) return false;
         if (c == constants.line_terminator or c == constants.carriage_return) return false;
+        // Colon is the key-value separator - must be quoted
+        if (c == constants.colon) return false;
+        // Tab always requires quoting (it's a delimiter)
+        if (c == constants.tab_char) return false;
     }
 
     if (literal_utils.isBooleanOrNullLiteral(s)) return false;
@@ -284,7 +293,6 @@ test "isSafeUnquoted - safe values" {
     try std.testing.expect(isSafeUnquoted("hello_world"));
     try std.testing.expect(isSafeUnquoted("HelloWorld"));
     try std.testing.expect(isSafeUnquoted("some-value"));
-    try std.testing.expect(isSafeUnquoted("value:with:colons"));
     try std.testing.expect(isSafeUnquoted("dot.ted.path"));
 }
 
@@ -315,6 +323,13 @@ test "isSafeUnquoted - needs quoting" {
     try std.testing.expect(!isSafeUnquoted("-45"));
     try std.testing.expect(!isSafeUnquoted("3.14"));
     try std.testing.expect(!isSafeUnquoted("007"));
+    // Contains colon (key-value separator)
+    try std.testing.expect(!isSafeUnquoted("value:with:colons"));
+    try std.testing.expect(!isSafeUnquoted("a:b"));
+    // Starts with structural characters
+    try std.testing.expect(!isSafeUnquoted("[test]"));
+    try std.testing.expect(!isSafeUnquoted("{key}"));
+    try std.testing.expect(!isSafeUnquoted("[3]: x,y"));
 }
 
 test "isSafeUnquotedWithDelimiter - comma delimiter" {

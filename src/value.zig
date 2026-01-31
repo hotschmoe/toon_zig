@@ -178,6 +178,8 @@ pub const Object = struct {
     pub const Entry = struct {
         key: []const u8,
         value: Value,
+        /// If true, the key was originally quoted and should not be path-expanded.
+        is_literal: bool = false,
     };
 
     const Self = @This();
@@ -340,9 +342,14 @@ pub const ObjectBuilder = struct {
 
     /// Put a key-value pair (takes ownership of value, clones key).
     pub fn put(self: *Self, key: []const u8, value: Value) Allocator.Error!void {
+        return self.putWithLiteral(key, value, false);
+    }
+
+    /// Put a key-value pair with literal key flag (takes ownership of value, clones key).
+    pub fn putWithLiteral(self: *Self, key: []const u8, value: Value, is_literal: bool) Allocator.Error!void {
         const key_copy = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(key_copy);
-        try self.entries.append(self.allocator, .{ .key = key_copy, .value = value });
+        try self.entries.append(self.allocator, .{ .key = key_copy, .value = value, .is_literal = is_literal });
     }
 
     /// Put a key-value pair (clones both).

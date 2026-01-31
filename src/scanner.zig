@@ -119,6 +119,9 @@ pub const ScannedLine = struct {
     /// For key_value lines: the key (unescaped if quoted).
     key: ?[]const u8,
 
+    /// Whether the key was originally quoted (for path expansion decisions).
+    key_was_quoted: bool,
+
     /// For key_value lines: the value portion (may be empty for nested content).
     /// For list_item lines: the value after the hyphen.
     value: ?[]const u8,
@@ -210,6 +213,22 @@ pub const Scanner = struct {
 
     /// Scan a single line and produce a ScannedLine.
     fn scanLine(self: *Scanner, raw_line: []const u8, line_number: usize) errors.Error!ScannedLine {
+        // Check for blank line (whitespace-only) BEFORE validating indentation
+        // Per spec, blank lines are not subject to indentation validation
+        if (isBlankContent(raw_line)) {
+            return ScannedLine{
+                .line_type = .blank,
+                .depth = 0,
+                .content = raw_line,
+                .key = null,
+                .key_was_quoted = false,
+                .value = null,
+                .array_header = null,
+                .line_number = line_number,
+                .raw_line = raw_line,
+            };
+        }
+
         // Validate and compute indentation
         const indent_result = validation.validateIndentation(raw_line, self.indent_size);
         const depth: usize = switch (indent_result) {
@@ -228,23 +247,12 @@ pub const Scanner = struct {
         const indent_chars = depth * self.indent_size;
         const content = if (indent_chars < raw_line.len) raw_line[indent_chars..] else "";
 
-        // Check for blank line
-        if (isBlankContent(content)) {
-            return ScannedLine{
-                .line_type = .blank,
-                .depth = depth,
-                .content = content,
-                .key = null,
-                .value = null,
-                .array_header = null,
-                .line_number = line_number,
-                .raw_line = raw_line,
-            };
-        }
-
-        // Check for list item
-        if (content.len >= 2 and content[0] == constants.list_marker and content[1] == constants.space) {
-            return self.scanListItem(raw_line, content, depth, line_number);
+        // Check for list item: "- value" or bare "-" (empty object)
+        if (content.len >= 1 and content[0] == constants.list_marker) {
+            // Either "- " followed by content, or bare "-" at end of line
+            if (content.len == 1 or content[1] == constants.space) {
+                return self.scanListItem(raw_line, content, depth, line_number);
+            }
         }
 
         // Check for array header or key-value
@@ -253,14 +261,34 @@ pub const Scanner = struct {
 
     /// Scan a list item line.
     fn scanListItem(self: *Scanner, raw_line: []const u8, content: []const u8, depth: usize, line_number: usize) errors.Error!ScannedLine {
+        // Handle bare hyphen (empty object marker)
+        if (content.len == 1) {
+            return ScannedLine{
+                .line_type = .list_item,
+                .depth = depth,
+                .content = content,
+                .key = null,
+                .key_was_quoted = false,
+                .value = null, // null value indicates empty object
+                .array_header = null,
+                .line_number = line_number,
+                .raw_line = raw_line,
+            };
+        }
+
         // Content after "- "
         const item_content = content[2..];
+
+        // Check for array header within list item (e.g., "- [2]: a,b" or "- key[2]: a,b")
+        if (findArrayBracket(item_content)) |bracket_pos| {
+            return self.scanListItemArrayHeader(raw_line, content, item_content, depth, line_number, bracket_pos);
+        }
 
         // Check if it's a list item with key-value (- key: value)
         if (findUnquotedColon(item_content)) |colon_pos| {
             const key_part = item_content[0..colon_pos];
-            const key = try self.parseKey(key_part);
-            errdefer if (key) |k| self.allocator.free(k);
+            const key_result = try self.parseKey(key_part);
+            errdefer if (key_result.key) |k| self.allocator.free(k);
 
             const value_start = colon_pos + 1;
             const value = if (value_start < item_content.len) blk: {
@@ -272,7 +300,8 @@ pub const Scanner = struct {
                 .line_type = .list_item,
                 .depth = depth,
                 .content = content,
-                .key = key,
+                .key = key_result.key,
+                .key_was_quoted = key_result.was_quoted,
                 .value = value,
                 .array_header = null,
                 .line_number = line_number,
@@ -286,8 +315,84 @@ pub const Scanner = struct {
             .depth = depth,
             .content = content,
             .key = null,
+            .key_was_quoted = false,
             .value = if (item_content.len > 0) item_content else null,
             .array_header = null,
+            .line_number = line_number,
+            .raw_line = raw_line,
+        };
+    }
+
+    /// Scan a list item that contains an array header (e.g., "- [2]: a,b" or "- key[2]: a,b")
+    fn scanListItemArrayHeader(self: *Scanner, raw_line: []const u8, content: []const u8, item_content: []const u8, depth: usize, line_number: usize, bracket_pos: usize) errors.Error!ScannedLine {
+        // Parse optional key before bracket
+        var key: ?[]const u8 = null;
+        var key_was_quoted = false;
+        if (bracket_pos > 0) {
+            const key_result = try self.parseKey(item_content[0..bracket_pos]);
+            key = key_result.key;
+            key_was_quoted = key_result.was_quoted;
+        }
+        errdefer if (key) |k| self.allocator.free(k);
+
+        // Find the closing bracket
+        const rest = item_content[bracket_pos + 1 ..];
+        const close_bracket = std.mem.indexOfScalar(u8, rest, constants.bracket_close) orelse {
+            return errors.Error.MalformedArrayHeader;
+        };
+
+        // Parse count and optional delimiter from inside brackets
+        const bracket_content = rest[0..close_bracket];
+        const count_delimiter = try parseCountAndDelimiter(bracket_content);
+
+        // Check for field list after bracket
+        const after_bracket = rest[close_bracket + 1 ..];
+        var fields: ?[]const []const u8 = null;
+        var fields_end: usize = 0;
+
+        if (after_bracket.len > 0 and after_bracket[0] == constants.brace_open) {
+            const brace_result = try self.parseFieldList(after_bracket[1..], count_delimiter.delimiter);
+            fields = brace_result.fields;
+            fields_end = brace_result.end_pos + 1; // +1 for opening brace
+        }
+        errdefer if (fields) |f| {
+            for (f) |field| self.allocator.free(field);
+            self.allocator.free(f);
+        };
+
+        // Find the colon after bracket/fields
+        const colon_search = after_bracket[fields_end..];
+        const colon_pos = std.mem.indexOfScalar(u8, colon_search, constants.colon) orelse {
+            return errors.Error.MalformedArrayHeader;
+        };
+
+        // Get inline values after colon (if any)
+        var inline_values: ?[]const u8 = null;
+        const after_colon = colon_search[colon_pos + 1 ..];
+        if (after_colon.len > 0) {
+            const trimmed = std.mem.trimLeft(u8, after_colon, " ");
+            if (trimmed.len > 0) {
+                inline_values = try self.allocator.dupe(u8, trimmed);
+            }
+        }
+        errdefer if (inline_values) |v| self.allocator.free(v);
+
+        const header = ArrayHeader{
+            .key = key,
+            .count = count_delimiter.count,
+            .delimiter = count_delimiter.delimiter,
+            .fields = fields,
+            .inline_values = inline_values,
+        };
+
+        return ScannedLine{
+            .line_type = .list_item,
+            .depth = depth,
+            .content = content,
+            .key = null,
+            .key_was_quoted = key_was_quoted,
+            .value = null,
+            .array_header = header,
             .line_number = line_number,
             .raw_line = raw_line,
         };
@@ -303,8 +408,8 @@ pub const Scanner = struct {
         // Regular key-value line
         if (findUnquotedColon(content)) |colon_pos| {
             const key_part = content[0..colon_pos];
-            const key = try self.parseKey(key_part);
-            errdefer if (key) |k| self.allocator.free(k);
+            const key_result = try self.parseKey(key_part);
+            errdefer if (key_result.key) |k| self.allocator.free(k);
 
             const value_start = colon_pos + 1;
             const value = if (value_start < content.len) blk: {
@@ -316,7 +421,8 @@ pub const Scanner = struct {
                 .line_type = .key_value,
                 .depth = depth,
                 .content = content,
-                .key = key,
+                .key = key_result.key,
+                .key_was_quoted = key_result.was_quoted,
                 .value = value,
                 .array_header = null,
                 .line_number = line_number,
@@ -331,6 +437,7 @@ pub const Scanner = struct {
             .depth = depth,
             .content = content,
             .key = null,
+            .key_was_quoted = false,
             .value = content,
             .array_header = null,
             .line_number = line_number,
@@ -342,8 +449,11 @@ pub const Scanner = struct {
     fn scanArrayHeader(self: *Scanner, raw_line: []const u8, content: []const u8, depth: usize, line_number: usize, bracket_pos: usize) errors.Error!ScannedLine {
         // Parse optional key before bracket
         var key: ?[]const u8 = null;
+        var key_was_quoted = false;
         if (bracket_pos > 0) {
-            key = try self.parseKey(content[0..bracket_pos]);
+            const key_result = try self.parseKey(content[0..bracket_pos]);
+            key = key_result.key;
+            key_was_quoted = key_result.was_quoted;
         }
         errdefer if (key) |k| self.allocator.free(k);
 
@@ -402,6 +512,7 @@ pub const Scanner = struct {
             .depth = depth,
             .content = content,
             .key = null,
+            .key_was_quoted = key_was_quoted,
             .value = null,
             .array_header = header,
             .line_number = line_number,
@@ -409,18 +520,27 @@ pub const Scanner = struct {
         };
     }
 
-    /// Parse a key (quoted or unquoted) and return the unescaped key string.
-    fn parseKey(self: *Scanner, raw_key: []const u8) errors.Error!?[]const u8 {
+    /// Result of parsing a key.
+    const ParseKeyResult = struct {
+        key: ?[]const u8,
+        was_quoted: bool,
+    };
+
+    /// Parse a key (quoted or unquoted) and return the unescaped key string with quote status.
+    fn parseKey(self: *Scanner, raw_key: []const u8) errors.Error!ParseKeyResult {
         const key = std.mem.trim(u8, raw_key, " ");
-        if (key.len == 0) return null;
+        if (key.len == 0) return .{ .key = null, .was_quoted = false };
 
         if (key[0] == constants.double_quote) {
-            return try string_utils.parseQuotedString(self.allocator, key);
+            return .{
+                .key = try string_utils.parseQuotedString(self.allocator, key),
+                .was_quoted = true,
+            };
         }
 
         // Unquoted key - duplicate it
         const duped = self.allocator.dupe(u8, key) catch return errors.Error.OutOfMemory;
-        return duped;
+        return .{ .key = duped, .was_quoted = false };
     }
 
     /// Parse field list from inside braces.
@@ -665,9 +785,10 @@ test "Scanner - blank lines" {
     try std.testing.expectEqual(LineType.blank, line1.line_type);
     try std.testing.expectEqual(@as(usize, 0), line1.depth);
 
+    // Whitespace-only lines are blank with depth 0 (per spec, not validated for indentation)
     const line2 = (try scanner.next()).?;
     try std.testing.expectEqual(LineType.blank, line2.line_type);
-    try std.testing.expectEqual(@as(usize, 1), line2.depth);
+    try std.testing.expectEqual(@as(usize, 0), line2.depth);
 
     try std.testing.expectEqual(@as(?ScannedLine, null), try scanner.next());
 }
