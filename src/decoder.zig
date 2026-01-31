@@ -2192,4 +2192,3 @@ test "path expansion with strict mode (conformance case)" {
     defer allocator.free(json);
     try std.testing.expectEqualStrings("{\"a\":{\"b\":{\"c\":1,\"d\":2},\"e\":3}}", json);
 }
-
