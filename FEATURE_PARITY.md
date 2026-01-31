@@ -15,25 +15,20 @@ This document tracks feature parity between the Rust reference implementation (`
 
 ---
 
-## Conformance Test Gaps
+## Conformance Test Status
 
-Conformance tests (21/22 fixture files passing) reveal the following implementation gaps:
+**Full conformance achieved: 22/22 fixture files passing (392 total tests)**
 
-### Encoder Gaps
-
-All encoder fixture files now pass (9/9):
+### Encoder (9/9 passing)
 - primitives, objects, arrays-primitive, arrays-nested, arrays-objects
 - arrays-tabular, delimiters, key-folding, whitespace
 
-### Decoder Gaps
+### Decoder (13/13 passing)
+- primitives, objects, arrays-primitive, arrays-nested, arrays-objects
+- arrays-tabular, delimiters, key-folding, whitespace
+- path-expansion, list-arrays, validation-errors, edge-cases
 
-12/13 decoder fixture files pass. Remaining gap:
-
-- **Validation errors** (decode/validation-errors): 2 tests fail
-  - Missing colon detection in key-value context (`a:\n  user` should error)
-  - Multiple root primitives in strict mode (`hello\nworld` should error)
-
-### Recently Fixed (commits 27f7c08, 9f5944e, 00271c4)
+### Recently Fixed (commits 27f7c08, 9f5944e, 00271c4, db77ad9)
 
 - **Escape sequences**: Tab escape handling in strings
 - **Value quoting**: Strings containing colons and delimiters properly quoted
@@ -865,9 +860,9 @@ Key folding collapses single-child object chains into dotted paths:
   - 22 fixture files with 392 total tests
   - Run with `zig build test-conformance`
 
-- [~] **9.3.2** Cross-validate with spec fixtures
-  - 21/22 fixture files fully passing
-  - 1 remaining: decode/validation-errors (strict mode error detection)
+- [x] **9.3.2** Cross-validate with spec fixtures
+  - 22/22 fixture files fully passing
+  - Full TOON spec v3.0 conformance achieved
   - See [CONFORMANCE.md](./CONFORMANCE.md) for detailed status
 
 ---

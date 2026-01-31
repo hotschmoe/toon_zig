@@ -68,11 +68,10 @@ pub const Decoder = struct {
                 const result = try self.decodePrimitive();
                 errdefer @constCast(&result).deinit(self.allocator);
 
-                // In strict mode, check for additional content after root primitive
+                // In strict mode, reject additional content after root primitive
                 if (self.options.strict) {
-                    const trailing = try self.peekNonBlank();
-                    if (trailing != null and trailing.?.depth == 0) {
-                        return errors.Error.InvalidToon;
+                    if (try self.peekNonBlank()) |trailing| {
+                        if (trailing.depth == 0) return errors.Error.InvalidToon;
                     }
                 }
                 return result;
