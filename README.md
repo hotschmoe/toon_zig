@@ -2,6 +2,8 @@
 
 A spec-first Zig implementation of [TOON (Token-Oriented Object Notation)](https://toonformat.dev/), a compact, human-readable data serialization format designed specifically for minimizing token usage in large language model applications.
 
+**Status: Full TOON v3.0 conformance (22/22 test suites, 392 tests passing)**
+
 ## What is TOON?
 
 TOON is an alternative to JSON that achieves **40-60% token reduction** on real-world data by leveraging indentation-based structure instead of verbose punctuation. It preserves the full JSON data model (objects, arrays, strings, numbers, booleans, null) while being more efficient for LLM input/output.
@@ -19,20 +21,38 @@ JSON (25 tokens):                    TOON (15 tokens):
 
 ## Features
 
-- **Spec-compliant**: Full conformance with [TOON Specification v3.0](https://github.com/toon-format/spec)
+- **Full spec conformance**: 100% compliance with [TOON Specification v3.0](https://github.com/toon-format/spec)
 - **High performance**: Native Zig implementation with zero runtime dependencies
-- **Streaming decoder**: Process large inputs without full buffering
+- **Streaming decoder**: Event-based processing for large inputs
 - **Deterministic output**: Stable diffs and reproducible pipelines
-- **Strict validation**: Optional relaxed mode for lenient parsing
+- **Strict validation**: Optional lenient mode for relaxed parsing
 - **Cross-platform**: Builds for Linux, macOS, Windows (x86_64 and aarch64)
 
 ## Installation
 
-### From Releases
+### As a Zig Package (Library)
+
+Add toon_zig to your project using `zig fetch`:
+
+```bash
+zig fetch --save git+https://github.com/hotschmoe/toon_zig.git
+```
+
+Then add it to your `build.zig`:
+
+```zig
+const toon_dep = b.dependency("toon_zig", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("toon", toon_dep.module("toon_zig"));
+```
+
+### Pre-built Binaries
 
 Download pre-built binaries from the [Releases](https://github.com/hotschmoe/toon_zig/releases) page.
 
-### From Source
+### Build from Source
 
 Requires Zig 0.15.2 or later.
 
@@ -65,26 +85,58 @@ tzu convert data.toon              # .toon -> JSON output
 tzu stats input.json
 ```
 
-### Library
+### Library API
 
 ```zig
-const toon = @import("toon_zig");
+const toon = @import("toon");
 const std = @import("std");
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // Encode JSON to TOON
-    const json_input =
-        \\{"name": "Alice", "age": 30}
-    ;
-    const toon_output = try toon.encode(allocator, json_input);
+    // Encode JSON string to TOON string
+    const json_input = "{\"name\": \"Alice\", \"age\": 30}";
+    const toon_output = try toon.jsonToToon(allocator, json_input);
     defer allocator.free(toon_output);
+    // Result: "name: Alice\nage: 30\n"
 
-    // Decode TOON to JSON
-    const json_output = try toon.decode(allocator, toon_output);
+    // Decode TOON string to JSON string
+    const toon_input = "name: Alice\nage: 30\n";
+    const json_output = try toon.toonToJson(allocator, toon_input);
     defer allocator.free(json_output);
+    // Result: "{\"name\":\"Alice\",\"age\":30}"
+
+    // Work with Value trees directly
+    var val = try toon.decode(allocator, toon_input);
+    defer val.deinit(allocator);
+
+    const name = val.object.get("name").?.string; // "Alice"
+    const age = val.object.get("age").?.number;   // 30.0
+    _ = name;
+    _ = age;
 }
+```
+
+#### Encoding Options
+
+```zig
+const encoded = try toon.jsonToToonWithOptions(allocator, json, .{
+    .indent = 2,                    // spaces per indent level (default: 2)
+    .delimiter = .comma,            // .comma, .pipe, or .tab
+    .key_folding = .safe,           // .off or .safe (collapse nested objects)
+});
+```
+
+#### Decoding Options
+
+```zig
+const decoded = try toon.toonToJsonWithOptions(allocator, input, .{
+    .strict = true,                 // enforce spec validation (default: true)
+    .expand_paths = .safe,          // .off or .safe (expand dotted keys)
+    .indent = 2,                    // expected indent size
+});
 ```
 
 ## TOON Format Overview
@@ -155,44 +207,57 @@ zig build -Dtarget=x86_64-windows
 
 ```
 toon_zig/
-  build.zig         # Build configuration
-  build.zig.zon     # Package manifest
+  build.zig             # Build configuration
+  build.zig.zon         # Package manifest
   src/
-    main.zig        # CLI entry point
-    root.zig        # Library root (public API)
-    encoder.zig     # JSON -> TOON encoder
-    decoder.zig     # TOON -> JSON decoder
-    parser.zig      # TOON parser
-    value.zig       # Value representation
+    main.zig            # CLI entry point
+    root.zig            # Library root (public API)
+    encoder.zig         # JSON -> TOON encoder
+    decoder.zig         # TOON -> JSON decoder
+    scanner.zig         # Line tokenizer
+    parser.zig          # Semantic parser
+    value.zig           # Value representation
+    stream.zig          # Streaming types and options
+    errors.zig          # Error types
+    constants.zig       # Shared constants
+    shared/
+      literal_utils.zig # Boolean/null/number detection
+      string_utils.zig  # Escape/unescape helpers
+      validation.zig    # Key and value validation
   tests/
-    fixtures/       # Test fixtures from spec
+    conformance.zig     # Conformance test runner
+    fixtures/           # TOON spec test fixtures
 ```
 
 ## Specification Conformance
 
+**Full conformance achieved: 22/22 test suites (392 tests)**
+
 This implementation is validated against the [TOON Specification v3.0](https://github.com/toon-format/spec) official test suite.
 
 ```bash
-# Initialize submodule (first time only)
-git submodule update --init --recursive
-
 # Run conformance tests
 zig build test-conformance
 ```
 
-See [CONFORMANCE.md](./CONFORMANCE.md) for detailed compliance status.
+See [CONFORMANCE.md](./CONFORMANCE.md) for detailed results.
 
-### Supported Features
+### Implemented Features
 
-This implementation targets full compliance with TOON Specification v3.0, including:
+Complete TOON v3.0 support:
 
 - Line-oriented, indentation-based format
 - UTF-8 encoding with LF line endings
-- 2-space indentation (configurable)
+- Configurable indentation (default: 2 spaces)
 - Canonical number representation
-- Delimiter support (comma, tab, pipe)
-- Key folding and path expansion
-- Strict validation mode
+- All delimiter types (comma, tab, pipe)
+- Key folding (nested objects to dotted paths)
+- Path expansion (dotted keys to nested objects)
+- Tabular arrays (uniform object arrays)
+- Inline primitive arrays
+- Expanded list arrays
+- Strict mode validation
+- Lenient mode parsing
 
 ## Related Projects
 
