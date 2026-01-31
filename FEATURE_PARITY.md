@@ -17,23 +17,35 @@ This document tracks feature parity between the Rust reference implementation (`
 
 ## Conformance Test Gaps
 
-Conformance tests (9/22 fixture files passing) reveal the following implementation gaps:
+Conformance tests (21/22 fixture files passing) reveal the following implementation gaps:
 
 ### Encoder Gaps
 
-- **Escape sequences**: Tab escape handling in strings (`\t` -> `\\t`)
-- **Value quoting**: Strings containing colons and delimiters not being quoted
-- **Empty containers**: Empty object list items not encoded as bare hyphen
-- **Key folding**: Sibling literal-key collision detection in safe mode
+All encoder fixture files now pass (9/9):
+- primitives, objects, arrays-primitive, arrays-nested, arrays-objects
+- arrays-tabular, delimiters, key-folding, whitespace
 
 ### Decoder Gaps
 
+12/13 decoder fixture files pass. Remaining gap:
+
+- **Validation errors** (decode/validation-errors): 2 tests fail
+  - Missing colon detection in key-value context (`a:\n  user` should error)
+  - Multiple root primitives in strict mode (`hello\nworld` should error)
+
+### Recently Fixed (commits 27f7c08, 9f5944e, 00271c4)
+
+- **Escape sequences**: Tab escape handling in strings
+- **Value quoting**: Strings containing colons and delimiters properly quoted
+- **Empty containers**: Empty object list items encoded as bare hyphen
+- **Key folding**: Sibling literal-key collision detection in safe mode
 - **Path expansion**: Dotted key expansion to nested objects in safe mode
-- **Blank lines**: Blank line handling after arrays ends
-- **Empty items**: List arrays with empty items causing CountMismatch
-- **Delimiter handling**: Nested arrays with tab delimiter not parsing correctly
-- **Validation errors**: Some error conditions not detected (missing colon, multiple root primitives)
-- **Indentation**: Lines with only spaces treated as invalid instead of empty
+- **Blank lines**: Blank line handling in arrays
+- **Empty items**: List arrays with empty items
+- **Delimiter handling**: Nested arrays with tab delimiter
+- **Tabular headers**: Keys requiring quotes now properly quoted
+- **Tabular detection**: Same-key objects detected regardless of key order
+- **Memory leaks**: Path expansion memory management fixed
 
 See [CONFORMANCE.md](./CONFORMANCE.md) for detailed test results.
 
@@ -854,7 +866,8 @@ Key folding collapses single-child object chains into dotted paths:
   - Run with `zig build test-conformance`
 
 - [~] **9.3.2** Cross-validate with spec fixtures
-  - 9/22 fixture files fully passing
+  - 21/22 fixture files fully passing
+  - 1 remaining: decode/validation-errors (strict mode error detection)
   - See [CONFORMANCE.md](./CONFORMANCE.md) for detailed status
 
 ---
