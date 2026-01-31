@@ -1020,15 +1020,8 @@ fn findEntryIndex(builder: *value.ObjectBuilder, key: []const u8) ?usize {
 /// Decode TOON with path expansion.
 pub fn decodeWithPathExpansion(allocator: Allocator, input: []const u8) errors.Error!value.Value {
     var result = try decode(allocator, input);
-    errdefer result.deinit(allocator);
-
-    if (result == .object or result == .array) {
-        const expanded = try expandPaths(allocator, result);
-        result.deinit(allocator);
-        return expanded;
-    }
-
-    return result;
+    defer result.deinit(allocator);
+    return expandPaths(allocator, result);
 }
 
 /// Convert TOON to JSON with path expansion.

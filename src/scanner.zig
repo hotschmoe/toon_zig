@@ -325,74 +325,15 @@ pub const Scanner = struct {
 
     /// Scan a list item that contains an array header (e.g., "- [2]: a,b" or "- key[2]: a,b")
     fn scanListItemArrayHeader(self: *Scanner, raw_line: []const u8, content: []const u8, item_content: []const u8, depth: usize, line_number: usize, bracket_pos: usize) errors.Error!ScannedLine {
-        // Parse optional key before bracket
-        var key: ?[]const u8 = null;
-        var key_was_quoted = false;
-        if (bracket_pos > 0) {
-            const key_result = try self.parseKey(item_content[0..bracket_pos]);
-            key = key_result.key;
-            key_was_quoted = key_result.was_quoted;
-        }
-        errdefer if (key) |k| self.allocator.free(k);
-
-        // Find the closing bracket
-        const rest = item_content[bracket_pos + 1 ..];
-        const close_bracket = std.mem.indexOfScalar(u8, rest, constants.bracket_close) orelse {
-            return errors.Error.MalformedArrayHeader;
-        };
-
-        // Parse count and optional delimiter from inside brackets
-        const bracket_content = rest[0..close_bracket];
-        const count_delimiter = try parseCountAndDelimiter(bracket_content);
-
-        // Check for field list after bracket
-        const after_bracket = rest[close_bracket + 1 ..];
-        var fields: ?[]const []const u8 = null;
-        var fields_end: usize = 0;
-
-        if (after_bracket.len > 0 and after_bracket[0] == constants.brace_open) {
-            const brace_result = try self.parseFieldList(after_bracket[1..], count_delimiter.delimiter);
-            fields = brace_result.fields;
-            fields_end = brace_result.end_pos + 1; // +1 for opening brace
-        }
-        errdefer if (fields) |f| {
-            for (f) |field| self.allocator.free(field);
-            self.allocator.free(f);
-        };
-
-        // Find the colon after bracket/fields
-        const colon_search = after_bracket[fields_end..];
-        const colon_pos = std.mem.indexOfScalar(u8, colon_search, constants.colon) orelse {
-            return errors.Error.MalformedArrayHeader;
-        };
-
-        // Get inline values after colon (if any)
-        var inline_values: ?[]const u8 = null;
-        const after_colon = colon_search[colon_pos + 1 ..];
-        if (after_colon.len > 0) {
-            const trimmed = std.mem.trimLeft(u8, after_colon, " ");
-            if (trimmed.len > 0) {
-                inline_values = try self.allocator.dupe(u8, trimmed);
-            }
-        }
-        errdefer if (inline_values) |v| self.allocator.free(v);
-
-        const header = ArrayHeader{
-            .key = key,
-            .count = count_delimiter.count,
-            .delimiter = count_delimiter.delimiter,
-            .fields = fields,
-            .inline_values = inline_values,
-        };
-
+        const result = try self.parseArrayHeaderContent(item_content, bracket_pos);
         return ScannedLine{
             .line_type = .list_item,
             .depth = depth,
             .content = content,
             .key = null,
-            .key_was_quoted = key_was_quoted,
+            .key_was_quoted = result.key_was_quoted,
             .value = null,
-            .array_header = header,
+            .array_header = result.header,
             .line_number = line_number,
             .raw_line = raw_line,
         };
@@ -447,6 +388,29 @@ pub const Scanner = struct {
 
     /// Scan an array header line.
     fn scanArrayHeader(self: *Scanner, raw_line: []const u8, content: []const u8, depth: usize, line_number: usize, bracket_pos: usize) errors.Error!ScannedLine {
+        const result = try self.parseArrayHeaderContent(content, bracket_pos);
+        return ScannedLine{
+            .line_type = .array_header,
+            .depth = depth,
+            .content = content,
+            .key = null,
+            .key_was_quoted = result.key_was_quoted,
+            .value = null,
+            .array_header = result.header,
+            .line_number = line_number,
+            .raw_line = raw_line,
+        };
+    }
+
+    /// Parsed array header components.
+    const ArrayHeaderParseResult = struct {
+        header: ArrayHeader,
+        key_was_quoted: bool,
+    };
+
+    /// Parse array header content starting from the bracket position.
+    /// Shared by scanArrayHeader and scanListItemArrayHeader.
+    fn parseArrayHeaderContent(self: *Scanner, content: []const u8, bracket_pos: usize) errors.Error!ArrayHeaderParseResult {
         // Parse optional key before bracket
         var key: ?[]const u8 = null;
         var key_was_quoted = false;
@@ -475,7 +439,7 @@ pub const Scanner = struct {
         if (after_bracket.len > 0 and after_bracket[0] == constants.brace_open) {
             const brace_result = try self.parseFieldList(after_bracket[1..], count_delimiter.delimiter);
             fields = brace_result.fields;
-            fields_end = brace_result.end_pos + 1; // +1 for opening brace
+            fields_end = brace_result.end_pos + 1;
         }
         errdefer if (fields) |f| {
             for (f) |field| self.allocator.free(field);
@@ -497,26 +461,16 @@ pub const Scanner = struct {
                 inline_values = try self.allocator.dupe(u8, trimmed);
             }
         }
-        errdefer if (inline_values) |v| self.allocator.free(v);
 
-        const header = ArrayHeader{
-            .key = key,
-            .count = count_delimiter.count,
-            .delimiter = count_delimiter.delimiter,
-            .fields = fields,
-            .inline_values = inline_values,
-        };
-
-        return ScannedLine{
-            .line_type = .array_header,
-            .depth = depth,
-            .content = content,
-            .key = null,
+        return .{
+            .header = .{
+                .key = key,
+                .count = count_delimiter.count,
+                .delimiter = count_delimiter.delimiter,
+                .fields = fields,
+                .inline_values = inline_values,
+            },
             .key_was_quoted = key_was_quoted,
-            .value = null,
-            .array_header = header,
-            .line_number = line_number,
-            .raw_line = raw_line,
         };
     }
 
@@ -634,46 +588,8 @@ fn findArrayBracket(content: []const u8) ?usize {
     return null;
 }
 
-/// Result of parsing count and delimiter from bracket content.
-const CountDelimiter = struct {
-    count: usize,
-    delimiter: constants.Delimiter,
-};
-
-/// Parse count and optional delimiter from array bracket content.
-/// Format: N or N| or N\t
-fn parseCountAndDelimiter(content: []const u8) errors.Error!CountDelimiter {
-    if (content.len == 0) return errors.Error.MalformedArrayHeader;
-
-    // Find where the count ends
-    var count_end: usize = 0;
-    while (count_end < content.len and constants.isDigit(content[count_end])) {
-        count_end += 1;
-    }
-
-    if (count_end == 0) return errors.Error.MalformedArrayHeader;
-
-    // Validate and parse count
-    const count_str = content[0..count_end];
-    if (!validation.isValidArrayCount(count_str)) {
-        return errors.Error.MalformedArrayHeader;
-    }
-
-    const count = std.fmt.parseInt(usize, count_str, 10) catch {
-        return errors.Error.MalformedArrayHeader;
-    };
-
-    // Parse optional delimiter
-    const delimiter: constants.Delimiter = if (count_end >= content.len)
-        constants.default_delimiter
-    else switch (content[count_end]) {
-        '|' => .pipe,
-        '\t' => .tab,
-        else => return errors.Error.MalformedArrayHeader,
-    };
-
-    return .{ .count = count, .delimiter = delimiter };
-}
+/// Alias for the shared parseCountAndDelimiter function.
+const parseCountAndDelimiter = validation.parseCountAndDelimiter;
 
 /// Parse delimiter-separated values into a slice of strings.
 /// For values that also need quoting information preserved, use parseDelimitedTokens instead.
@@ -1044,32 +960,6 @@ test "parseDelimitedTokens - empty" {
     defer allocator.free(tokens);
 
     try std.testing.expectEqual(@as(usize, 0), tokens.len);
-}
-
-test "parseCountAndDelimiter - count only" {
-    const result = try parseCountAndDelimiter("5");
-    try std.testing.expectEqual(@as(usize, 5), result.count);
-    try std.testing.expectEqual(constants.Delimiter.comma, result.delimiter);
-}
-
-test "parseCountAndDelimiter - with pipe" {
-    const result = try parseCountAndDelimiter("3|");
-    try std.testing.expectEqual(@as(usize, 3), result.count);
-    try std.testing.expectEqual(constants.Delimiter.pipe, result.delimiter);
-}
-
-test "parseCountAndDelimiter - with tab" {
-    const result = try parseCountAndDelimiter("10\t");
-    try std.testing.expectEqual(@as(usize, 10), result.count);
-    try std.testing.expectEqual(constants.Delimiter.tab, result.delimiter);
-}
-
-test "parseCountAndDelimiter - invalid leading zero" {
-    try std.testing.expectError(errors.Error.MalformedArrayHeader, parseCountAndDelimiter("007"));
-}
-
-test "parseCountAndDelimiter - empty" {
-    try std.testing.expectError(errors.Error.MalformedArrayHeader, parseCountAndDelimiter(""));
 }
 
 test "Scanner - hasMore and reset" {

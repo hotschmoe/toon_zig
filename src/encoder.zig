@@ -382,7 +382,7 @@ fn encodeRootObject(writer: anytype, obj: value.Object, options: FullEncodeOptio
 }
 
 fn encodeRootArray(writer: anytype, arr: value.Array, options: FullEncodeOptions) !void {
-    try encodeArrayHeader(writer, null, arr, 0, options);
+    try encodeArrayHeader(writer, null, arr, options);
     try encodeArrayBody(writer, arr, 1, options);
 }
 
@@ -426,7 +426,7 @@ fn encodeKeyValuePairWithContext(
         },
         .array => |arr| {
             try writeIndent(writer, depth, options.indent);
-            try encodeArrayHeader(writer, key, arr, depth, options);
+            try encodeArrayHeader(writer, key, arr, options);
             try encodeArrayBody(writer, arr, depth + 1, options);
         },
         .object => |obj| {
@@ -595,7 +595,7 @@ fn tryFoldKeyValue(
 // Array encoding
 // ----------------------------------------------------------------------------
 
-fn encodeArrayHeader(writer: anytype, key: ?[]const u8, arr: value.Array, depth: usize, options: FullEncodeOptions) !void {
+fn encodeArrayHeader(writer: anytype, key: ?[]const u8, arr: value.Array, options: FullEncodeOptions) !void {
     if (key) |k| {
         try writeKey(writer, k);
     }
@@ -628,7 +628,6 @@ fn encodeArrayHeader(writer: anytype, key: ?[]const u8, arr: value.Array, depth:
         try encodeInlineArrayValues(writer, arr, options);
     }
     try writer.writeByte(constants.line_terminator);
-    _ = depth;
 }
 
 fn encodeArrayBody(writer: anytype, arr: value.Array, depth: usize, options: FullEncodeOptions) anyerror!void {
@@ -680,7 +679,7 @@ fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: Ful
         },
         .array => |arr| {
             try writer.writeAll("- ");
-            try encodeArrayHeader(writer, null, arr, depth, options);
+            try encodeArrayHeader(writer, null, arr, options);
             try encodeArrayBody(writer, arr, depth + 1, options);
         },
         .object => |obj| {
@@ -705,7 +704,7 @@ fn encodeListItem(writer: anytype, item: value.Value, depth: usize, options: Ful
 
 /// Write the value portion of a key-value pair (after the key has been written).
 /// Handles primitives, arrays, and nested objects.
-fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, siblings: []const value.Object.Entry, options: FullEncodeOptions) !void {
+fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, _: []const value.Object.Entry, options: FullEncodeOptions) !void {
     switch (val) {
         .null, .bool, .number, .string => {
             try writer.writeAll(": ");
@@ -713,7 +712,7 @@ fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, siblin
             try writer.writeByte(constants.line_terminator);
         },
         .array => |arr| {
-            try encodeArrayHeader(writer, null, arr, content_depth - 1, options);
+            try encodeArrayHeader(writer, null, arr, options);
             try encodeArrayBody(writer, arr, content_depth, options);
         },
         .object => |obj| {
@@ -721,7 +720,6 @@ fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, siblin
             for (obj.entries) |entry| {
                 try encodeKeyValuePairWithSiblings(writer, entry.key, entry.value, content_depth, obj.entries, options);
             }
-            _ = siblings;
         },
     }
 }

@@ -342,46 +342,8 @@ fn findArrayBracket(content: []const u8) ?usize {
     return null;
 }
 
-/// Result of parsing count and delimiter.
-const CountDelimiter = struct {
-    count: usize,
-    delimiter: constants.Delimiter,
-};
-
-/// Parse count and optional delimiter from bracket content.
-/// Format: N or N| or N\t
-fn parseCountAndDelimiter(content: []const u8) errors.Error!CountDelimiter {
-    if (content.len == 0) return errors.Error.MalformedArrayHeader;
-
-    // Find where the count ends
-    var count_end: usize = 0;
-    while (count_end < content.len and constants.isDigit(content[count_end])) {
-        count_end += 1;
-    }
-
-    if (count_end == 0) return errors.Error.MalformedArrayHeader;
-
-    // Validate count (no leading zeros except for "0")
-    const count_str = content[0..count_end];
-    if (!validation.isValidArrayCount(count_str)) {
-        return errors.Error.MalformedArrayHeader;
-    }
-
-    const count = std.fmt.parseInt(usize, count_str, 10) catch {
-        return errors.Error.MalformedArrayHeader;
-    };
-
-    // Parse optional delimiter
-    const delimiter: constants.Delimiter = if (count_end >= content.len)
-        constants.default_delimiter
-    else switch (content[count_end]) {
-        '|' => .pipe,
-        '\t' => .tab,
-        else => return errors.Error.MalformedArrayHeader,
-    };
-
-    return .{ .count = count, .delimiter = delimiter };
-}
+/// Alias for the shared parseCountAndDelimiter function.
+const parseCountAndDelimiter = validation.parseCountAndDelimiter;
 
 /// Result of parsing a field list.
 const FieldListResult = struct {

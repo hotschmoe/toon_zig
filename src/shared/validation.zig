@@ -222,6 +222,53 @@ pub fn isValidArrayCount(s: []const u8) bool {
 }
 
 // ============================================================================
+// Array Header Parsing
+// ============================================================================
+
+const errors = @import("../errors.zig");
+
+/// Result of parsing count and delimiter from array bracket content.
+pub const CountDelimiter = struct {
+    count: usize,
+    delimiter: constants.Delimiter,
+};
+
+/// Parse count and optional delimiter from array bracket content.
+/// Format: N or N| or N\t
+pub fn parseCountAndDelimiter(content: []const u8) errors.Error!CountDelimiter {
+    if (content.len == 0) return errors.Error.MalformedArrayHeader;
+
+    // Find where the count ends
+    var count_end: usize = 0;
+    while (count_end < content.len and constants.isDigit(content[count_end])) {
+        count_end += 1;
+    }
+
+    if (count_end == 0) return errors.Error.MalformedArrayHeader;
+
+    // Validate and parse count
+    const count_str = content[0..count_end];
+    if (!isValidArrayCount(count_str)) {
+        return errors.Error.MalformedArrayHeader;
+    }
+
+    const count = std.fmt.parseInt(usize, count_str, 10) catch {
+        return errors.Error.MalformedArrayHeader;
+    };
+
+    // Parse optional delimiter
+    const delimiter: constants.Delimiter = if (count_end >= content.len)
+        constants.default_delimiter
+    else switch (content[count_end]) {
+        '|' => .pipe,
+        '\t' => .tab,
+        else => return errors.Error.MalformedArrayHeader,
+    };
+
+    return .{ .count = count, .delimiter = delimiter };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -433,4 +480,30 @@ test "isValidArrayCount - invalid counts" {
     try std.testing.expect(!isValidArrayCount("-1"));
     try std.testing.expect(!isValidArrayCount("abc"));
     try std.testing.expect(!isValidArrayCount("12a"));
+}
+
+test "parseCountAndDelimiter - count only" {
+    const result = try parseCountAndDelimiter("5");
+    try std.testing.expectEqual(@as(usize, 5), result.count);
+    try std.testing.expectEqual(constants.Delimiter.comma, result.delimiter);
+}
+
+test "parseCountAndDelimiter - with pipe" {
+    const result = try parseCountAndDelimiter("3|");
+    try std.testing.expectEqual(@as(usize, 3), result.count);
+    try std.testing.expectEqual(constants.Delimiter.pipe, result.delimiter);
+}
+
+test "parseCountAndDelimiter - with tab" {
+    const result = try parseCountAndDelimiter("10\t");
+    try std.testing.expectEqual(@as(usize, 10), result.count);
+    try std.testing.expectEqual(constants.Delimiter.tab, result.delimiter);
+}
+
+test "parseCountAndDelimiter - invalid leading zero" {
+    try std.testing.expectError(errors.Error.MalformedArrayHeader, parseCountAndDelimiter("007"));
+}
+
+test "parseCountAndDelimiter - empty" {
+    try std.testing.expectError(errors.Error.MalformedArrayHeader, parseCountAndDelimiter(""));
 }
