@@ -4,13 +4,13 @@ tzu is validated against the official TOON v3.0 specification fixtures from [too
 
 ## Status
 
-| Category | Fixtures | Tests | Passing |
-|----------|----------|-------|---------|
-| Encode   | 9        | 168   | In Progress |
-| Decode   | 13       | 224   | In Progress |
-| **Total** | **22**  | **392** | In Progress |
+| Category | Fixtures | Tests | Status |
+|----------|----------|-------|--------|
+| Encode   | 9        | 168   | PASS |
+| Decode   | 13       | 224   | PASS |
+| **Total** | **22**  | **392** | **PASS** |
 
-**Current Status:** 9/22 fixture files fully passing. Implementation is actively in progress.
+**Current Status:** Full conformance achieved - 22/22 fixture files passing (392 tests).
 
 ## Running Conformance Tests
 
@@ -61,17 +61,17 @@ Note: Conformance tests are currently separate from the main test suite (`zig bu
 | validation-errors.json | 10 | 14 | Error conditions |
 | indentation-errors.json | 15 | 14 | Indentation validation |
 
-## Known Issues
+## Resolved Issues
 
-The following areas have failing tests and are being actively worked on:
+All previously known issues have been fixed:
 
 1. **Escape sequences**: Tab escape handling in strings
-2. **Value quoting**: Strings containing colons and delimiters
-3. **Empty containers**: Empty object list items
-4. **Key folding**: Sibling literal-key collision detection
-5. **Path expansion**: Dotted key expansion mode
-6. **Blank lines**: Blank line handling after arrays
-7. **Error detection**: Some validation errors not caught
+2. **Value quoting**: Strings containing colons and delimiters properly quoted
+3. **Empty containers**: Empty object list items encoded as bare hyphen
+4. **Key folding**: Sibling literal-key collision detection in safe mode
+5. **Path expansion**: Dotted key expansion to nested objects
+6. **Blank lines**: Blank line handling in arrays (strict mode rejection)
+7. **Error detection**: Missing colon and multiple root primitives detected
 
 ## Test Architecture
 

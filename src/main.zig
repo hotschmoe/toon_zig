@@ -122,7 +122,7 @@ fn writeOutput(path: ?[]const u8, data: []const u8) !void {
         defer file.close();
         try file.writeAll(data);
     } else {
-        try std.io.getStdOut().writeAll(data);
+        try std.fs.File.stdout().writeAll(data);
     }
 }
 
