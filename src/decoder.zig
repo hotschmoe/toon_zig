@@ -928,10 +928,7 @@ fn expandObjectPathsWithOptions(allocator: Allocator, obj: value.Object, strict:
                         return errors.Error.PathExpansionConflict;
                     }
                 }
-                // LWW: Remove old entry to replace with new one
-                var removed_entry = builder.entries.orderedRemove(idx);
-                allocator.free(removed_entry.key);
-                @constCast(&removed_entry.value).deinit(allocator);
+                removeAndFreeEntry(&builder, allocator, idx);
             }
             try builder.put(entry.key, expanded_value);
         }
@@ -971,10 +968,7 @@ fn insertPathEntryWithOptions(builder: *value.ObjectBuilder, allocator: Allocato
                     return errors.Error.PathExpansionConflict;
                 }
             }
-            // LWW: Remove old entry to replace with new one
-            var removed_entry = builder.entries.orderedRemove(idx);
-            allocator.free(removed_entry.key);
-            @constCast(&removed_entry.value).deinit(allocator);
+            removeAndFreeEntry(builder, allocator, idx);
         }
         try builder.put(first_segment, val);
         return;
@@ -1005,12 +999,7 @@ fn insertPathEntryWithOptions(builder: *value.ObjectBuilder, allocator: Allocato
     try insertPathEntryWithOptions(&nested_builder, allocator, rest, val, strict);
     const nested_obj = nested_builder.toOwnedObject();
 
-    // Remove old entry if it existed
-    if (existing_idx) |idx| {
-        const entry = builder.entries.orderedRemove(idx);
-        allocator.free(entry.key);
-        @constCast(&entry.value).deinit(allocator);
-    }
+    if (existing_idx) |idx| removeAndFreeEntry(builder, allocator, idx);
 
     builder.put(first_segment, .{ .object = nested_obj }) catch return errors.Error.OutOfMemory;
 }
@@ -1020,6 +1009,13 @@ fn findEntryIndex(builder: *value.ObjectBuilder, key: []const u8) ?usize {
         if (std.mem.eql(u8, entry.key, key)) return i;
     }
     return null;
+}
+
+/// Remove and free an entry at the given index. Used for LWW replacement.
+fn removeAndFreeEntry(builder: *value.ObjectBuilder, allocator: Allocator, idx: usize) void {
+    var entry = builder.entries.orderedRemove(idx);
+    allocator.free(entry.key);
+    @constCast(&entry.value).deinit(allocator);
 }
 
 /// Decode TOON with path expansion.

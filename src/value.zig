@@ -352,21 +352,6 @@ pub const ObjectBuilder = struct {
         try self.entries.append(self.allocator, .{ .key = key_copy, .value = val, .is_literal = is_literal });
     }
 
-    /// Put or replace a key-value pair. If key exists, replaces value and frees old.
-    /// This prevents memory leaks when the same key is set multiple times.
-    pub fn putOrReplace(self: *Self, key: []const u8, val: Value) Allocator.Error!void {
-        for (self.entries.items) |*entry| {
-            if (std.mem.eql(u8, entry.key, key)) {
-                entry.value.deinit(self.allocator);
-                entry.value = val;
-                return;
-            }
-        }
-        const key_copy = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(key_copy);
-        try self.entries.append(self.allocator, .{ .key = key_copy, .value = val, .is_literal = false });
-    }
-
     /// Put a key-value pair (clones both).
     pub fn putClone(self: *Self, key: []const u8, val: Value) Allocator.Error!void {
         const key_copy = try self.allocator.dupe(u8, key);
