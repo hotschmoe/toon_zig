@@ -747,6 +747,7 @@ pub fn decodeWithOptions(allocator: Allocator, input: []const u8, options: strea
     var decoder = Decoder.init(allocator, input, options);
     defer decoder.deinit();
     var result = try decoder.decode();
+    errdefer result.deinit(allocator);
 
     // Apply path expansion if enabled
     if (options.expand_paths == .safe) {
@@ -961,15 +962,19 @@ fn insertPathEntryWithOptions(builder: *value.ObjectBuilder, allocator: Allocato
     const rest = iter.rest();
     if (rest.len == 0) {
         // Final segment - check for conflicts in strict mode
-        if (strict) {
-            const existing_idx = findEntryIndex(builder, first_segment);
-            if (existing_idx) |idx| {
-                const existing = builder.entries.items[idx].value;
+        const existing_idx = findEntryIndex(builder, first_segment);
+        if (existing_idx) |idx| {
+            const existing = builder.entries.items[idx].value;
+            if (strict) {
                 // Conflict: trying to overwrite something that was expanded
                 if (existing == .object and val != .object) {
                     return errors.Error.PathExpansionConflict;
                 }
             }
+            // LWW: Remove old entry to replace with new one
+            var removed_entry = builder.entries.orderedRemove(idx);
+            allocator.free(removed_entry.key);
+            @constCast(&removed_entry.value).deinit(allocator);
         }
         try builder.put(first_segment, val);
         return;
@@ -2165,3 +2170,18 @@ test "path expansion LWW - expanded object overwrites primitive" {
     defer allocator.free(json);
     try std.testing.expectEqualStrings("{\"a\":{\"b\":2}}", json);
 }
+
+test "path expansion with strict mode (conformance case)" {
+    const allocator = std.testing.allocator;
+    // This matches "expands and deep-merges preserving document-order insertion" from conformance
+    var result = try decodeWithOptions(allocator, "a.b.c: 1\na.b.d: 2\na.e: 3", .{
+        .expand_paths = .safe,
+        .strict = true,
+    });
+    defer result.deinit(allocator);
+
+    const json = try valueToJson(allocator, result);
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings("{\"a\":{\"b\":{\"c\":1,\"d\":2},\"e\":3}}", json);
+}
+

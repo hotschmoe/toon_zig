@@ -615,7 +615,7 @@ fn encodeArrayHeader(writer: anytype, key: ?[]const u8, arr: value.Array, option
         try writer.writeByte(constants.brace_open);
         for (0..header.len()) |i| {
             if (i > 0) try writer.writeByte(options.delimiter.char());
-            try writer.writeAll(header.getKey(i));
+            try writeKey(writer, header.getKey(i));
         }
         try writer.writeByte(constants.brace_close);
     }
@@ -728,7 +728,8 @@ fn writeKeyValue(writer: anytype, val: value.Value, content_depth: usize, _: []c
 // Type predicates
 // ----------------------------------------------------------------------------
 
-/// Returns true if all items are objects with the same keys in the same order.
+/// Returns true if all items are objects with the same set of keys.
+/// Keys may be in any order; the first object's order is used for output.
 fn isArrayOfHomogeneousObjects(arr: value.Array) bool {
     if (arr.len() < 1) return false;
     const first = arr.items[0];
@@ -736,19 +737,20 @@ fn isArrayOfHomogeneousObjects(arr: value.Array) bool {
     const first_obj = first.object;
     if (first_obj.count() == 0) return false;
 
+    // Check first object values are primitives
+    for (first_obj.entries) |entry| {
+        if (!entry.value.isPrimitive()) return false;
+    }
+
     for (arr.items[1..]) |item| {
         if (item != .object) return false;
         const obj = item.object;
         if (obj.count() != first_obj.count()) return false;
-        for (obj.entries, first_obj.entries) |a, b| {
-            if (!std.mem.eql(u8, a.key, b.key)) return false;
-            // Values must be primitives for tabular format
-            if (!a.value.isPrimitive()) return false;
+        // Check that obj has all keys from first_obj (in any order)
+        for (first_obj.entries) |first_entry| {
+            const val = obj.get(first_entry.key) orelse return false;
+            if (!val.isPrimitive()) return false;
         }
-    }
-    // Check first object values too
-    for (first_obj.entries) |entry| {
-        if (!entry.value.isPrimitive()) return false;
     }
     return true;
 }
