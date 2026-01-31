@@ -168,9 +168,23 @@ toon_zig/
     fixtures/       # Test fixtures from spec
 ```
 
-## Specification Compliance
+## Specification Conformance
 
-This implementation targets full compliance with [TOON Specification v3.0](https://github.com/toon-format/spec), including:
+This implementation is validated against the [TOON Specification v3.0](https://github.com/toon-format/spec) official test suite.
+
+```bash
+# Initialize submodule (first time only)
+git submodule update --init --recursive
+
+# Run conformance tests
+zig build test-conformance
+```
+
+See [CONFORMANCE.md](./CONFORMANCE.md) for detailed compliance status.
+
+### Supported Features
+
+This implementation targets full compliance with TOON Specification v3.0, including:
 
 - Line-oriented, indentation-based format
 - UTF-8 encoding with LF line endings

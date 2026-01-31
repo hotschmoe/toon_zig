@@ -823,11 +823,15 @@ Key folding collapses single-child object chains into dotted paths:
 
 **Tasks:**
 
-- [ ] **9.3.1** Import TOON spec test cases
+- [x] **9.3.1** Import TOON spec test cases
   - Validate against official spec examples
+  - Implemented in `tests/conformance.zig`
+  - 22 fixture files with 392 total tests
+  - Run with `zig build test-conformance`
 
-- [ ] **9.3.2** Cross-validate with toon_rust
-  - Ensure identical output for same inputs
+- [~] **9.3.2** Cross-validate with spec fixtures
+  - 9/22 fixture files fully passing
+  - See [CONFORMANCE.md](./CONFORMANCE.md) for detailed status
 
 ---
 

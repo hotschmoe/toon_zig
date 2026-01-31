@@ -28,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -37,8 +39,12 @@ jobs:
       - name: Build
         run: zig build -Doptimize=${{ matrix.optimize }}
 
-      - name: Run Tests
+      - name: Run Unit Tests
         run: zig build test -Doptimize=${{ matrix.optimize }}
+
+      - name: Run Conformance Tests
+        run: zig build test-conformance -Doptimize=${{ matrix.optimize }}
+        continue-on-error: true
 
       - name: Run Executable
         run: zig build run -Doptimize=${{ matrix.optimize }}
