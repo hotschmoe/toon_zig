@@ -160,10 +160,13 @@ jobs:
           mkdir -p src
           cat > src/main.zig << 'EOF'
           const toon_zig = @import("toon_zig");
+          const std = @import("std");
           pub fn main() !void {
-              // Verify package exports are accessible
-              const result = toon_zig.add(2, 3);
-              _ = result;
+              const allocator = std.heap.page_allocator;
+              const toon = try toon_zig.jsonToToon(allocator, "{\"test\": 1}");
+              defer allocator.free(toon);
+              const json = try toon_zig.toonToJson(allocator, toon);
+              defer allocator.free(json);
           }
           EOF
 

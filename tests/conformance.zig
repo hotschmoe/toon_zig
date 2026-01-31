@@ -168,7 +168,7 @@ fn valuesEqual(a: Value, b: Value) bool {
 }
 
 fn stdJsonToValue(allocator: Allocator, json_val: std.json.Value) !Value {
-    return toon.value.fromStdJson(allocator, json_val);
+    return toon.fromStdJson(allocator, json_val);
 }
 
 fn compareJsonValues(allocator: Allocator, actual: std.json.Value, expected: std.json.Value) !bool {

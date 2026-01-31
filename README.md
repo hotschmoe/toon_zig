@@ -77,12 +77,8 @@ tzu encode input.json              # writes to stdout
 tzu decode input.toon -o output.json
 tzu decode input.toon              # writes to stdout
 
-# Auto-detect based on file extension
-tzu convert data.json              # .json -> TOON output
-tzu convert data.toon              # .toon -> JSON output
-
-# Show token savings
-tzu stats input.json
+# Show token savings with encode
+tzu encode input.json --stats
 ```
 
 ### Library API

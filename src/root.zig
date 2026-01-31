@@ -5,77 +5,47 @@
 
 const std = @import("std");
 
-// Re-export public modules
-pub const constants = @import("constants.zig");
-pub const errors = @import("errors.zig");
-pub const value = @import("value.zig");
-pub const stream = @import("stream.zig");
-pub const scanner = @import("scanner.zig");
-pub const parser = @import("parser.zig");
-pub const decoder = @import("decoder.zig");
-pub const encoder = @import("encoder.zig");
-pub const literal_utils = @import("shared/literal_utils.zig");
-pub const string_utils = @import("shared/string_utils.zig");
-pub const validation = @import("shared/validation.zig");
+// Internal module imports (not re-exported)
+const constants = @import("constants.zig");
+const errors = @import("errors.zig");
+const value_mod = @import("value.zig");
+const stream = @import("stream.zig");
+const decoder = @import("decoder.zig");
+const encoder = @import("encoder.zig");
 
-// Re-export commonly used types from constants
+// Public types from constants
 pub const Delimiter = constants.Delimiter;
 pub const KeyFoldingMode = constants.KeyFoldingMode;
 pub const ExpandPathsMode = constants.ExpandPathsMode;
 
-// Re-export commonly used types from errors
+// Public error type
 pub const Error = errors.Error;
-pub const ErrorContext = errors.ErrorContext;
-pub const Result = errors.Result;
 
-// Re-export commonly used types from value
-pub const Value = value.Value;
-pub const Array = value.Array;
-pub const Object = value.Object;
-pub const ArrayBuilder = value.ArrayBuilder;
-pub const ObjectBuilder = value.ObjectBuilder;
+// Public value types
+pub const Value = value_mod.Value;
+pub const Array = value_mod.Array;
+pub const Object = value_mod.Object;
+pub const ArrayBuilder = value_mod.ArrayBuilder;
+pub const ObjectBuilder = value_mod.ObjectBuilder;
+pub const fromStdJson = value_mod.fromStdJson;
 
-// Re-export commonly used types from stream
-pub const JsonStreamEvent = stream.JsonStreamEvent;
+// Public options types
 pub const EncodeOptions = stream.EncodeOptions;
 pub const DecodeOptions = stream.DecodeOptions;
+pub const FullEncodeOptions = encoder.FullEncodeOptions;
 
-// Re-export commonly used types from scanner
-pub const Scanner = scanner.Scanner;
-pub const ScannedLine = scanner.ScannedLine;
-pub const LineType = scanner.LineType;
-pub const ArrayHeader = scanner.ArrayHeader;
-
-// Re-export commonly used types from parser
-pub const ParsedArrayHeader = parser.ParsedArrayHeader;
-pub const ParsedKey = parser.ParsedKey;
-pub const RootForm = parser.RootForm;
-
-// Re-export commonly used types from decoder
-pub const Decoder = decoder.Decoder;
-pub const EventBuilder = decoder.EventBuilder;
+// Core decoding functions
 pub const decode = decoder.decode;
 pub const decodeWithOptions = decoder.decodeWithOptions;
-pub const decodeToEvents = decoder.decodeToEvents;
-pub const decodeToEventsWithOptions = decoder.decodeToEventsWithOptions;
-pub const decodeToWriter = decoder.decodeToWriter;
-pub const decodeToWriterWithOptions = decoder.decodeToWriterWithOptions;
 pub const toonToJson = decoder.toonToJson;
 pub const toonToJsonWithOptions = decoder.toonToJsonWithOptions;
-pub const valueToJson = decoder.valueToJson;
-pub const expandPaths = decoder.expandPaths;
-pub const decodeWithPathExpansion = decoder.decodeWithPathExpansion;
 pub const toonToJsonWithPathExpansion = decoder.toonToJsonWithPathExpansion;
+pub const expandPaths = decoder.expandPaths;
 
-// Re-export commonly used functions from encoder
-pub const formatNumber = encoder.formatNumber;
-pub const normalizeValue = encoder.normalizeValue;
-pub const isCanonicalNumber = encoder.isCanonicalNumber;
+// Core encoding functions
 pub const encode = encoder.encode;
-pub const encodeToWriter = encoder.encodeToWriter;
 pub const jsonToToon = encoder.jsonToToon;
 pub const jsonToToonWithOptions = encoder.jsonToToonWithOptions;
-pub const FullEncodeOptions = encoder.FullEncodeOptions;
 
 test {
     // Run tests from all imported modules

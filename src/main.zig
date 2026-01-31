@@ -14,6 +14,7 @@ const std = @import("std");
 const toon_zig = @import("toon_zig");
 
 const version = "0.1.0";
+const spec_version = "3.0";
 
 // ============================================================================
 // CLI Arguments
@@ -202,7 +203,7 @@ fn printHelp(writer: anytype) !void {
     try writer.writeAll(
         \\tzu - TOON Zig Implementation (spec v
     );
-    try writer.writeAll(toon_zig.constants.spec_version);
+    try writer.writeAll(spec_version);
     try writer.writeAll(
         \\)
         \\
@@ -247,7 +248,7 @@ fn printHelp(writer: anytype) !void {
 }
 
 fn printVersion(writer: anytype) !void {
-    try writer.print("tzu {s} (TOON spec v{s})\n", .{ version, toon_zig.constants.spec_version });
+    try writer.print("tzu {s} (TOON spec v{s})\n", .{ version, spec_version });
 }
 
 // ============================================================================
@@ -307,9 +308,10 @@ pub fn main() !void {
 // Tests
 // ============================================================================
 
-test "library exports constants" {
-    try std.testing.expectEqualStrings("3.0", toon_zig.constants.spec_version);
+test "library exports public types" {
     try std.testing.expectEqual(@as(u8, ','), toon_zig.Delimiter.comma.char());
+    try std.testing.expectEqual(@as(u8, '|'), toon_zig.Delimiter.pipe.char());
+    try std.testing.expectEqual(@as(u8, '\t'), toon_zig.Delimiter.tab.char());
 }
 
 test "parseArgs encode mode" {
