@@ -15,6 +15,30 @@ This document tracks feature parity between the Rust reference implementation (`
 
 ---
 
+## Conformance Test Gaps
+
+Conformance tests (9/22 fixture files passing) reveal the following implementation gaps:
+
+### Encoder Gaps
+
+- **Escape sequences**: Tab escape handling in strings (`\t` -> `\\t`)
+- **Value quoting**: Strings containing colons and delimiters not being quoted
+- **Empty containers**: Empty object list items not encoded as bare hyphen
+- **Key folding**: Sibling literal-key collision detection in safe mode
+
+### Decoder Gaps
+
+- **Path expansion**: Dotted key expansion to nested objects in safe mode
+- **Blank lines**: Blank line handling after arrays ends
+- **Empty items**: List arrays with empty items causing CountMismatch
+- **Delimiter handling**: Nested arrays with tab delimiter not parsing correctly
+- **Validation errors**: Some error conditions not detected (missing colon, multiple root primitives)
+- **Indentation**: Lines with only spaces treated as invalid instead of empty
+
+See [CONFORMANCE.md](./CONFORMANCE.md) for detailed test results.
+
+---
+
 ## 1. Core Data Types
 
 ### 1.1 Value Representation (`src/value.zig`)
