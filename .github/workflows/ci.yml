@@ -104,6 +104,7 @@ jobs:
           .{
               .name = .test_consumer,
               .version = "0.0.0",
+              .fingerprint = 0xe5383c71d14e21dc,
               .dependencies = .{
                   .toon_zig = .{ .path = "../source" },
               },
