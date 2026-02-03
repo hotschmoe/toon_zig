@@ -102,7 +102,7 @@ jobs:
           cd test-consumer
           cat > build.zig.zon << 'EOF'
           .{
-              .name = "test-consumer",
+              .name = .test_consumer,
               .version = "0.0.0",
               .dependencies = .{
                   .toon_zig = .{ .path = "../source" },
