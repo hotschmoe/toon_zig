@@ -161,6 +161,22 @@ pub fn build(b: *std.Build) void {
     const conformance_step = b.step("test-conformance", "Run TOON spec conformance tests");
     conformance_step.dependOn(&run_conformance.step);
 
+    // Fuzz testing step
+    const fuzz_step = b.step("fuzz", "Run fuzz tests");
+    const fuzz_exe = b.addExecutable(.{
+        .name = "fuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "toon_zig", .module = mod },
+            },
+        }),
+    });
+    const fuzz_run = b.addRunArtifact(fuzz_exe);
+    fuzz_step.dependOn(&fuzz_run.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
